@@ -30,7 +30,7 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const fallbackAdminEmail = process.env.ADMIN_EMAIL || 'admin@nagoritea.com';
-const fallbackAdminPassword = process.env.ADMIN_PASSWORD || '9852120609';
+const fallbackAdminPassword = process.env.ADMIN_PASSWORD || '9852120609@';
 const clientOrderTimestamps = new Map<string, number>();
 
 // ── Admin sessions ───────────────────────────────────────────────────────────
