@@ -1,47 +1,55 @@
-// Vercel serverless entry point.
-// All /api/* routes are handled by the Express app; the built React app in /dist
-// is served by Vercel as static files (see vercel.json).
-import { initAdminAuth } from '../src/server/auth';
-import { store } from '../src/server/store';
-import { createApp } from '../src/server/app';
-import express from 'express';
+// Vercel serverless entry point - minimal version to test routing
+import type { IncomingMessage, ServerResponse } from 'http';
 
-// Initialize asynchronously on cold start.
-let initPromise: Promise<void> | null = null;
-let initError: Error | null = null;
-
-function ensureInit(): Promise<void> {
-  if (!initPromise) {
-    initPromise = (async () => {
+export default async function handler(req: IncomingMessage, res: ServerResponse) {
+  const url = new URL(req.url || '/', `http://${req.headers.host}`);
+  const path = url.pathname;
+  const method = req.method || 'GET';
+  
+  // Health check
+  if (path === '/api/health' && method === 'GET') {
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      status: 'ok',
+      message: 'API is running',
+      timestamp: new Date().toISOString()
+    }));
+    return;
+  }
+  
+  // Admin login
+  if (path === '/api/admin/login' && method === 'POST') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', async () => {
       try {
-        await initAdminAuth();
-        await store.waitUntilReady();
-      } catch (err) {
-        initError = err as Error;
-        console.error('[api] Initialization error:', err);
+        const { email, password } = JSON.parse(body);
+        if (password === '9852120609@') {
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({
+            success: true,
+            message: 'Login successful',
+            token: 'test-token-' + Date.now(),
+            user: { email: email || 'admin@nagoritea.com' }
+          }));
+        } else {
+          res.statusCode = 401;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ success: false, message: 'Invalid password' }));
+        }
+      } catch (error) {
+        res.statusCode = 400;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ success: false, message: 'Invalid request' }));
       }
-    })();
-  }
-  return initPromise;
-}
-
-// Wrap the Express app so initialization completes before any request is handled.
-const wrapper = express();
-
-// Initialization middleware — runs first, before the API routes below.
-wrapper.use(async (_req, res, next) => {
-  await ensureInit();
-  if (initError) {
-    return res.status(500).json({
-      error: 'Server initialization failed',
-      details: initError.message,
     });
+    return;
   }
-  next();
-});
-
-// Mount the actual API routes.
-const apiApp = createApp();
-wrapper.use(apiApp);
-
-export default wrapper;
+  
+  // 404 for unmatched routes
+  res.statusCode = 404;
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify({ error: 'Not found' }));
+}
