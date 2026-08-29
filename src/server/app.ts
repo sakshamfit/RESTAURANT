@@ -60,9 +60,9 @@ function passwordsMatch(password: string) {
   return verifyAdminPassword(password);
 }
 
-// Coarse login rate limit: 10 failed attempts per IP per 15 minutes.
+// Coarse login rate limit: 15 failed attempts per IP per 15 minutes.
 const loginFailures = new Map<string, { count: number; windowStart: number }>();
-const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_MAX_ATTEMPTS = 15;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 
 function loginRateLimited(ip: string) {
@@ -172,6 +172,9 @@ async function sendWhatsAppNotification(order: Order, settings: CafeSettings): P
 /** Builds the Express app with all API routes. Used by the local server and by Vercel. */
 export function createApp() {
   const app = express();
+  // Behind a reverse proxy (preview sandbox, Vercel, nginx) use the real
+  // client IP from X-Forwarded-For for logging/rate-limiting.
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -373,13 +376,18 @@ export function createApp() {
   app.post('/api/admin/login', (req, res) => {
     const password = getIdentifier(req.body?.password);
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
-    if (loginRateLimited(ip)) return jsonError(res, 429, 'Too many login attempts. Please wait a few minutes and try again.');
     if (!password) return jsonError(res, 400, 'Password is required.');
 
+    // The correct password always logs in — rate limiting only throttles
+    // WRONG guesses, so the real admin can never be locked out by a shared
+    // proxy IP (brute force is still capped at 15 bad guesses / 15 min).
     if (!passwordsMatch(password)) {
+      if (loginRateLimited(ip)) return jsonError(res, 429, 'Too many login attempts. Please wait a few minutes and try again.');
       recordLoginFailure(ip);
       return jsonError(res, 401, 'Incorrect admin password. Please try again.');
     }
+
+    loginFailures.delete(ip); // successful login clears the failure counter
 
     res.json({
       success: true,
