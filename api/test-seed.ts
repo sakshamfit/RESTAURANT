@@ -1,10 +1,9 @@
-// Test: does the seed module crash?
+// Test: does seed module crash with correct response API?
+import type { IncomingMessage, ServerResponse } from 'http';
 import { initialSettings, createMemorySnapshot } from '../src/server/seed';
 
-export default function handler(req: any, res: any) {
-  res.status(200).json({ 
-    status: 'ok', 
-    message: 'seed module works',
-    cafeName: initialSettings.cafeName
-  });
+export default function handler(req: IncomingMessage, res: ServerResponse) {
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify({ status: 'ok', message: 'seed module works', cafeName: initialSettings.cafeName }));
 }
