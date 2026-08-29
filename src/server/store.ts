@@ -42,8 +42,7 @@ function getSupabaseConfig() {
   const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
   const publicAnonKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
-  const authKey = publicAnonKey || serviceKey;
-  return { url, serviceKey, publicAnonKey, authKey, configured: Boolean(url && serviceKey) };
+  return { url, serviceKey, publicAnonKey, configured: Boolean(url && serviceKey) };
 }
 
 const config = getSupabaseConfig();
@@ -51,14 +50,6 @@ const config = getSupabaseConfig();
 export const supabaseConfigured = config.configured;
 export const supabaseAdmin: SupabaseClient | null = config.configured
   ? createClient(config.url, config.serviceKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    })
-  : null;
-
-// A separate, non-persisting client is used only for password sign-in. The service-role
-// key never reaches the browser.
-export const supabaseAuth: SupabaseClient | null = config.configured
-  ? createClient(config.url, config.authKey, {
       auth: { autoRefreshToken: false, persistSession: false },
     })
   : null;

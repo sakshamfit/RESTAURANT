@@ -5,19 +5,9 @@ const url = import.meta.env.VITE_SUPABASE_URL || '';
 const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
 // The browser only receives Supabase's publishable/anon key. All writes go through
-// the Express API, which uses the service-role key on the server.
+// the Express API. Admin login is the app's own single-admin flow (signed
+// session tokens from /api/admin/login); supabase.auth is not used for it.
 export const supabase: SupabaseClient | null = url && anonKey ? createClient(url, anonKey) : null;
-
-if (supabase) {
-  supabase.auth.onAuthStateChange((_event, session) => {
-    if (session?.access_token) localStorage.setItem('nagori_admin_token', session.access_token);
-    if (session?.refresh_token) localStorage.setItem('nagori_admin_refresh_token', session.refresh_token);
-    if (!session) {
-      localStorage.removeItem('nagori_admin_token');
-      localStorage.removeItem('nagori_admin_refresh_token');
-    }
-  });
-}
 
 const noop = () => {};
 
@@ -61,13 +51,19 @@ function subscribeToTable(
   }
 }
 
+/**
+ * Hands a session token to the Supabase client for Realtime authorization.
+ * Only real Supabase JWTs (three base64url segments) qualify; the app's own
+ * admin session tokens are two-segment HMAC tokens and are deliberately
+ * skipped (staff screens rely on the polling fallbacks in that case).
+ */
 export async function setSupabaseSession(accessToken: string, refreshToken?: string) {
   if (!supabase || !accessToken) return;
+  const isSupabaseJwt = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(accessToken);
+  if (!isSupabaseJwt) return;
   if (refreshToken) {
     await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
   } else {
-    // Preview sessions and sessions restored from older builds can still authorize
-    // Realtime without a refresh token.
     supabase.realtime.setAuth(accessToken);
   }
 }

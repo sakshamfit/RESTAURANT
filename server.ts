@@ -19,7 +19,6 @@ import {
   getSupabasePublicConfig,
   store,
   supabaseAdmin,
-  supabaseAuth,
   supabaseConfigured,
   postgresConfigured,
   newId,
@@ -32,8 +31,74 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const fallbackAdminEmail = process.env.ADMIN_EMAIL || 'admin@nagoritea.com';
 const fallbackAdminPassword = process.env.ADMIN_PASSWORD || '9852120609';
-const fallbackAdminTokens = new Set<string>();
 const clientOrderTimestamps = new Map<string, number>();
+
+// ── Admin sessions ───────────────────────────────────────────────────────────
+// There is exactly one admin (ADMIN_EMAIL / ADMIN_PASSWORD) and exactly one way
+// to log in: /api/admin/login with that password — the same in every
+// persistence mode (Supabase API, direct Postgres, memory preview). Sessions
+// are HMAC-signed tokens with a 7-day expiry, verified locally (no network
+// round-trip per request) and surviving server restarts.
+const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const envSessionSecret = process.env.ADMIN_SESSION_SECRET || '';
+const adminSessionSecret =
+  envSessionSecret.length >= 16
+    ? envSessionSecret
+    : crypto.createHash('sha256')
+        .update(`nagori-chai-admin-session-v1:${fallbackAdminEmail}:${fallbackAdminPassword}`)
+        .digest('hex');
+
+function signAdminToken(email: string) {
+  const payload = Buffer.from(JSON.stringify({ sub: 'admin', email, iat: Date.now(), exp: Date.now() + ADMIN_SESSION_TTL_MS })).toString('base64url');
+  const signature = crypto.createHmac('sha256', adminSessionSecret).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function verifyAdminToken(token: string): { email?: string } | null {
+  const [payload, signature] = token.split('.');
+  if (!payload || !signature) return null;
+  const expected = crypto.createHmac('sha256', adminSessionSecret).update(payload).digest();
+  let given: Buffer;
+  try {
+    given = Buffer.from(signature, 'base64url');
+  } catch {
+    return null;
+  }
+  if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (decoded?.sub !== 'admin' || typeof decoded.exp !== 'number' || Date.now() > decoded.exp) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+function passwordsMatch(password: string) {
+  const given = Buffer.from(password);
+  const expected = Buffer.from(fallbackAdminPassword);
+  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+}
+
+// Coarse login rate limit: 10 failed attempts per IP per 15 minutes.
+const loginFailures = new Map<string, { count: number; windowStart: number }>();
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
+function loginRateLimited(ip: string) {
+  const entry = loginFailures.get(ip);
+  if (!entry || Date.now() - entry.windowStart > LOGIN_WINDOW_MS) return false;
+  return entry.count >= LOGIN_MAX_ATTEMPTS;
+}
+
+function recordLoginFailure(ip: string) {
+  const entry = loginFailures.get(ip);
+  if (!entry || Date.now() - entry.windowStart > LOGIN_WINDOW_MS) {
+    loginFailures.set(ip, { count: 1, windowStart: Date.now() });
+  } else {
+    entry.count += 1;
+  }
+}
 
 function pgUrlSafe() {
   // Hostname only — never log credentials.
@@ -88,25 +153,15 @@ function getBearerToken(req: Request) {
   return header?.startsWith('Bearer ') ? header.slice(7).trim() : '';
 }
 
-// Supabase Auth owns admin sessions when the Supabase provider is active. When the
-// app persists via direct Postgres (or a bare local preview) a short-lived local
-// session token issued by /api/admin/login is used instead.
-async function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
+// The single admin login: every admin request must carry the HMAC session
+// token issued by /api/admin/login (or still be within its 7-day expiry).
+function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   const token = getBearerToken(req);
   if (!token) return jsonError(res, 401, 'Unauthorized: Missing admin session.');
-
-  if (supabaseAdmin && store.provider === 'supabase') {
-    const { data, error } = await supabaseAdmin.auth.getUser(token);
-    if (error || !data.user) return jsonError(res, 401, 'Unauthorized: Supabase session is invalid or expired.');
-    if (!data.user.email || data.user.email.toLowerCase() !== fallbackAdminEmail.toLowerCase()) {
-      return jsonError(res, 403, 'This Supabase user is not configured as the café administrator.');
-    }
-    (req as Request & { adminUser?: typeof data.user }).adminUser = data.user;
-    return next();
-  }
-
-  if (!fallbackAdminTokens.has(token)) return jsonError(res, 401, 'Unauthorized: Invalid local preview session.');
-  return next();
+  const session = verifyAdminToken(token);
+  if (!session) return jsonError(res, 401, 'Unauthorized: Admin session is invalid or expired. Please log in again.');
+  (req as Request & { adminUser?: { email?: string } }).adminUser = { email: session.email || fallbackAdminEmail };
+  next();
 }
 
 async function sendWhatsAppNotification(order: Order, settings: CafeSettings): Promise<{ success: boolean; error?: string }> {
@@ -344,44 +399,37 @@ app.post('/api/feedback', async (req, res) => {
 });
 
 // ----------------------------------------------------
-// Supabase Auth + protected admin APIs
+// Single admin login + protected admin APIs
 // ----------------------------------------------------
-app.post('/api/admin/login', async (req, res) => {
-  const inputEmail = getIdentifier(req.body?.email);
+// The one and only login: the single admin password (ADMIN_PASSWORD). It works
+// identically in every persistence mode (Supabase API, direct Postgres, memory
+// preview), and the returned signed session survives server restarts.
+app.post('/api/admin/login', (req, res) => {
   const password = getIdentifier(req.body?.password);
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  if (loginRateLimited(ip)) return jsonError(res, 429, 'Too many login attempts. Please wait a few minutes and try again.');
   if (!password) return jsonError(res, 400, 'Password is required.');
 
-  if (supabaseAuth && supabaseAdmin && store.provider === 'supabase') {
-    const configuredEmail = fallbackAdminEmail.toLowerCase();
-    const email = inputEmail.includes('@') ? inputEmail.toLowerCase() : configuredEmail;
-    if (email !== configuredEmail) return jsonError(res, 401, 'Invalid admin credentials.');
-    const { data, error } = await supabaseAuth.auth.signInWithPassword({ email, password });
-    if (error || !data.session || !data.user) {
-      return jsonError(res, 401, error?.message || 'Invalid Supabase admin credentials. Create the admin user in Supabase Authentication first.');
-    }
-    return res.json({
-      success: true,
-      token: data.session.access_token,
-      refreshToken: data.session.refresh_token,
-      expiresAt: data.session.expires_at,
-      admin: { email: data.user.email || email },
-    });
+  if (!passwordsMatch(password)) {
+    recordLoginFailure(ip);
+    return jsonError(res, 401, 'Incorrect admin password. Please try again.');
   }
 
-  const acceptedNames = new Set(['nagori tea point', 'nagoriteapoint', 'nagori chai point', 'nagori', 'admin', fallbackAdminEmail.toLowerCase()]);
-  if (!acceptedNames.has((inputEmail || 'admin').toLowerCase()) || password !== fallbackAdminPassword) return jsonError(res, 401, 'Invalid admin credentials.');
-  const token = `preview_${crypto.randomBytes(24).toString('hex')}`;
-  fallbackAdminTokens.add(token);
-  res.json({ success: true, token, admin: { email: fallbackAdminEmail } });
+  res.json({
+    success: true,
+    token: signAdminToken(fallbackAdminEmail),
+    expiresAt: new Date(Date.now() + ADMIN_SESSION_TTL_MS).toISOString(),
+    admin: { email: fallbackAdminEmail },
+  });
 });
 
 app.get('/api/admin/me', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
   res.json({ email: req.adminUser?.email || fallbackAdminEmail, cafeName: (await store.getSettings()).cafeName });
 });
 
-app.post('/api/admin/logout', requireAdminAuth, (req, res) => {
-  const token = getBearerToken(req);
-  fallbackAdminTokens.delete(token);
+// Sessions are stateless (signed tokens), so logging out is a client-side
+// token removal; the token itself simply expires after its 7-day lifetime.
+app.post('/api/admin/logout', requireAdminAuth, (_req, res) => {
   res.json({ success: true });
 });
 
@@ -659,22 +707,15 @@ app.put('/api/admin/settings', requireAdminAuth, async (req, res) => {
   res.json({ success: true, settings });
 });
 
-app.post('/api/admin/change-password', requireAdminAuth, async (req: Request & { adminUser?: { id?: string; email?: string } }, res) => {
+// The admin password is the single ADMIN_PASSWORD from the environment — it
+// cannot be changed at runtime; update ADMIN_PASSWORD in .env and restart.
+app.post('/api/admin/change-password', requireAdminAuth, (req, res) => {
   const currentPassword = getIdentifier(req.body?.currentPassword);
-  const newPassword = getIdentifier(req.body?.newPassword);
-  if (!currentPassword || !newPassword) return jsonError(res, 400, 'Current and new password are required.');
-  if (newPassword.length < 6) return jsonError(res, 400, 'New password must be at least 6 characters.');
-
-  if (supabaseAdmin && supabaseAuth && store.provider === 'supabase' && req.adminUser?.id && req.adminUser.email) {
-    const { error: verifyError } = await supabaseAuth.auth.signInWithPassword({ email: req.adminUser.email, password: currentPassword });
-    if (verifyError) return jsonError(res, 401, 'Current password is incorrect.');
-    const { error } = await supabaseAdmin.auth.admin.updateUserById(req.adminUser.id, { password: newPassword });
-    if (error) return jsonError(res, 500, error.message);
-    return res.json({ success: true, message: 'Password updated successfully.' });
-  }
-
-  if (currentPassword !== fallbackAdminPassword) return jsonError(res, 401, 'Current password is incorrect.');
-  res.json({ success: true, message: 'Password updated for this local preview session.' });
+  if (!passwordsMatch(currentPassword)) return jsonError(res, 401, 'Current password is incorrect.');
+  res.json({
+    success: true,
+    message: 'Current password verified. The admin password is managed via the ADMIN_PASSWORD environment variable — update it in .env and restart the server to change it.',
+  });
 });
 
 // ----------------------------------------------------
