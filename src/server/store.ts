@@ -1,8 +1,8 @@
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { Client, ClientConfig, Pool, PoolConfig } from 'pg';
 import net from 'net';
 import crypto from 'crypto';
 import path from 'path';
+import fs from 'fs';
 import { readFile } from 'fs/promises';
 import dotenv from 'dotenv';
 
@@ -11,7 +11,7 @@ import { AppSnapshot, createMemorySnapshot, initialCategories, initialProducts, 
 import { CafeCategory, CafeSettings, CafeTable, CustomerFeedback, Order, Product, WaiterCall } from '../types';
 
 export type StoreCollection = 'categories' | 'tables' | 'products' | 'orders' | 'feedbacks' | 'waiterCalls';
-export type StoreProvider = 'supabase' | 'postgres' | 'memory-preview';
+export type StoreProvider = 'postgres' | 'file';
 
 type CollectionModel = {
   categories: CafeCategory;
@@ -38,34 +38,29 @@ const TABLES: Record<StoreCollection, string> = {
   waiterCalls: 'app_waiter_calls',
 };
 
-function getSupabaseConfig() {
-  const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
-  const publicAnonKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
-  return { url, serviceKey, publicAnonKey, configured: Boolean(url && serviceKey) };
-}
+// ── Local JSON file persistence (default, no cloud needed) ──────────────────
+const DATA_DIR = path.join(process.cwd(), 'data');
+const DATA_FILE = path.join(DATA_DIR, 'restaurant.json');
 
-const config = getSupabaseConfig();
+type DataFile = {
+  settings: CafeSettings;
+  categories: CafeCategory[];
+  tables: CafeTable[];
+  products: Product[];
+  orders: Order[];
+  feedbacks: CustomerFeedback[];
+  waiterCalls: WaiterCall[];
+  counters: { orders: number };
+};
 
-export const supabaseConfigured = config.configured;
-export const supabaseAdmin: SupabaseClient | null = config.configured
-  ? createClient(config.url, config.serviceKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    })
-  : null;
-
-// ── Direct Postgres persistence ──────────────────────────────────────────────
+// ── Direct Postgres persistence (optional) ──────────────────────────────────
 // When DATABASE_URL is present the app talks to the database directly (pg driver,
-// JSONB document tables from supabase/schema.sql). This is the same database the
-// Supabase clients use; it is the active provider when Supabase API keys are not
-// configured, or as a fallback when the Supabase API is unreachable.
+// JSONB document tables from db/schema.sql). If the database is unreachable the
+// app falls back to the local JSON file so it always boots and login always works.
 const pgUrl = process.env.DATABASE_URL || '';
 const pgDirectUrl = process.env.DIRECT_URL || pgUrl;
 export const postgresConfigured = Boolean(pgUrl);
 
-// Supabase pools/direct hosts are the target, so force IPv4 (the pooler path is
-// IPv4-only). TLS is negotiated when the server offers it (Supabase always does);
-// a probe falls back to a plain connection for non-TLS servers.
 const PG_FAMILY = 4;
 const PG_TIMEOUT_MS = Number(process.env.PG_CONNECT_TIMEOUT_MS || 15000);
 
@@ -90,9 +85,7 @@ async function resolvePgSsl(): Promise<'tls' | 'none'> {
 }
 
 // node-postgres creates its socket without options, so a `family` setting in the
-// client config is silently ignored. We pass a socket factory that forces IPv4
-// (the Supabase pooler path is IPv4-only) and surfaces a clear error when a host
-// has no IPv4 address.
+// client config is silently ignored. We pass a socket factory that forces IPv4.
 function ipv4SocketFactory() {
   return () => {
     const socket = new net.Socket();
@@ -135,9 +128,6 @@ function pgTableName(collection: StoreCollection) {
   return TABLES[collection];
 }
 
-let memory = createMemorySnapshot();
-let memoryCounter = 1040;
-
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -150,94 +140,103 @@ function isMissingTableError(error: any) {
   return Boolean(error?.code === '42P01' || error?.code === 'PGRST205');
 }
 
+function orderNumberValue(order: Order): number {
+  const match = String(order.orderNumber || '').match(/(\d+)\s*$/);
+  return match ? Number(match[1]) : 0;
+}
+
 /**
- * The application has one persistence layer, in order of preference:
- * 1. Supabase (PostgREST/Realtime/Storage) when its server credentials are set.
- * 2. Direct Postgres (DATABASE_URL) when Supabase is not configured or unreachable.
- * 3. In-memory preview — only so a fresh clone can be demoed with no database at
- *    all; it never reads or writes a local database file.
+ * Persistence: either direct Postgres (DATABASE_URL), or a local JSON file at
+ * data/restaurant.json. No Supabase, no Firebase, no other cloud services —
+ * the app is fully self-contained and always starts.
  */
 export class RestaurantStore {
   private ready: Promise<void>;
-  private useSupabase = Boolean(supabaseAdmin);
   private usePostgres = postgresConfigured;
+  private memory: DataFile;
 
   constructor() {
+    this.memory = this.loadOrCreateDataFileSync();
     this.ready = this.initialize();
   }
 
   get provider(): StoreProvider {
-    if (this.useSupabase) return 'supabase';
-    if (this.usePostgres) return 'postgres';
-    return 'memory-preview';
+    return this.usePostgres ? 'postgres' : 'file';
   }
 
   async waitUntilReady() {
     await this.ready;
   }
 
-  private async initialize() {
-    let lastError: unknown = null;
-
-    if (this.useSupabase && supabaseAdmin) {
-      try {
-        const { error } = await supabaseAdmin.from('app_settings').select('id').eq('id', 'config').maybeSingle();
-        if (error) {
-          if (isMissingTableError(error)) {
-            const schemaError = new Error('Supabase is configured but the database schema is missing. Run supabase/schema.sql in the Supabase SQL Editor.');
-            (schemaError as Error & { code?: string }).code = 'SCHEMA_MISSING';
-            throw schemaError;
-          }
-          throw error;
-        }
-      } catch (error) {
-        lastError = error;
-        this.useSupabase = false;
-        if (this.usePostgres) {
-          console.warn('Supabase API is configured but unreachable from this environment; falling back to the direct Postgres connection (DATABASE_URL).', error?.message || error);
-        } else if (process.env.NODE_ENV === 'production') {
-          throw error;
-        } else {
-          console.warn('Supabase is configured but unavailable in this development preview; continuing without it.', error?.message || error);
-        }
-      }
+  private loadOrCreateDataFileSync(): DataFile {
+    try {
+      const raw = fs.readFileSync(DATA_FILE, 'utf8');
+      const parsed = JSON.parse(raw) as Partial<DataFile>;
+      const base = createMemorySnapshot();
+      const deriveCounter = () =>
+        Math.max(1040, ...(Array.isArray(parsed.orders) ? parsed.orders.map(orderNumberValue) : [0]));
+      return {
+        settings: { ...base.settings, ...(parsed.settings || {}) },
+        categories: Array.isArray(parsed.categories) ? parsed.categories : base.categories,
+        tables: Array.isArray(parsed.tables) ? parsed.tables : base.tables,
+        products: Array.isArray(parsed.products) ? parsed.products : base.products,
+        orders: Array.isArray(parsed.orders) ? parsed.orders : base.orders,
+        feedbacks: Array.isArray(parsed.feedbacks) ? parsed.feedbacks : base.feedbacks,
+        waiterCalls: Array.isArray(parsed.waiterCalls) ? parsed.waiterCalls : base.waiterCalls,
+        counters: { orders: Number(parsed.counters?.orders) || deriveCounter() },
+      };
+    } catch {
+      return this.createDataFile();
     }
+  }
 
-    if (!this.useSupabase && this.usePostgres) {
+  private createDataFile(): DataFile {
+    const base = createMemorySnapshot();
+    const file: DataFile = {
+      ...base,
+      counters: { orders: 1040 },
+    };
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    this.persistSync(file);
+    console.log('[store] Created local data file data/restaurant.json');
+    return file;
+  }
+
+  private persistSync(data: DataFile) {
+    fs.writeFileSync(`${DATA_FILE}.tmp`, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(`${DATA_FILE}.tmp`, DATA_FILE);
+  }
+
+  private async persist() {
+    await fs.promises.mkdir(DATA_DIR, { recursive: true });
+    const tmpPath = `${DATA_FILE}.tmp`;
+    await fs.promises.writeFile(tmpPath, JSON.stringify(this.memory, null, 2), 'utf8');
+    await fs.promises.rename(tmpPath, DATA_FILE);
+  }
+
+  private async initialize() {
+    if (this.usePostgres) {
       try {
         await this.ensurePostgresSchema();
-      } catch (error) {
-        lastError = error;
-        this.usePostgres = false;
-        if (process.env.NODE_ENV === 'production' && !this.useSupabase) throw error;
-        console.warn('Postgres is configured (DATABASE_URL) but unreachable from this environment; using memory-only preview data.', (error as Error)?.message || error);
-      }
-    }
-
-    if (this.useSupabase || this.usePostgres) {
-      try {
-        // Seed only missing records. Existing menu edits and orders are never overwritten.
         const settings = await this.getSettingsInternal();
         if (!settings) await this.putSettingsInternal(initialSettings);
         await this.seedMissing('categories', initialCategories);
         await this.seedMissing('tables', initialTables);
         await this.seedMissing('products', initialProducts);
         await this.ensureCounter();
+        console.log('[store] Persistence: direct Postgres (DATABASE_URL).');
+        return;
       } catch (error) {
-        lastError = error;
-        if (process.env.NODE_ENV === 'production') throw error;
-        this.useSupabase = false;
         this.usePostgres = false;
-        console.warn('Database is configured but failed to initialise in this development preview; using memory-only preview data.', (error as Error)?.message || error);
+        console.warn('[store] Postgres configured but unreachable; using the local data file instead.', (error as Error)?.message || error);
       }
-    } else if (lastError && (supabaseConfigured || postgresConfigured)) {
-      console.warn('No persistence backend is available in this environment; using memory-only preview data. Set Supabase keys or DATABASE_URL for real persistence.');
     }
+    console.log('[store] Persistence: local file data/restaurant.json (no cloud services).');
   }
 
   /**
    * Verifies the app tables exist; on a fresh database it applies
-   * supabase/schema.sql once over a single direct connection.
+   * db/schema.sql once over a single direct connection.
    */
   private async ensurePostgresSchema() {
     const pool = await getPool();
@@ -246,7 +245,7 @@ export class RestaurantStore {
     );
     if (rows[0]?.settings && rows[0]?.counters) return;
 
-    const schemaPath = path.join(process.cwd(), 'supabase', 'schema.sql');
+    const schemaPath = path.join(process.cwd(), 'db', 'schema.sql');
     const sql = await readFile(schemaPath, 'utf8');
     await resolvePgSsl();
     const clientOptions: PgOptions = {
@@ -266,9 +265,9 @@ export class RestaurantStore {
 
     const check = await pool.query(`select to_regclass('public.app_settings') as settings`);
     if (!check.rows[0]?.settings) {
-      throw new Error('Database schema is still missing after running supabase/schema.sql.');
+      throw new Error('Database schema is still missing after running db/schema.sql.');
     }
-    console.log('Postgres schema was not present; applied supabase/schema.sql automatically.');
+    console.log('[store] Postgres schema was not present; applied db/schema.sql automatically.');
   }
 
   private async seedMissing<C extends StoreCollection>(collection: C, records: CollectionModel[C][]) {
@@ -286,31 +285,13 @@ export class RestaurantStore {
   }
 
   private async ensureCounter() {
-    if (this.useSupabase && supabaseAdmin) {
-      const { error } = await supabaseAdmin
-        .from('app_counters')
-        .upsert({ id: 'orders', value: 1040 }, { onConflict: 'id', ignoreDuplicates: true });
-      if (error) throw error;
-    } else if (this.usePostgres) {
-      await (await getPool()).query(
-        `insert into app_counters (id, value) values ('orders', 1040) on conflict (id) do nothing`
-      );
-    }
+    if (!this.usePostgres) return;
+    await (await getPool()).query(
+      `insert into app_counters (id, value) values ('orders', 1040) on conflict (id) do nothing`
+    );
   }
 
   private async listInternal<C extends StoreCollection>(collection: C): Promise<CollectionModel[C][]> {
-    if (this.useSupabase && supabaseAdmin) {
-      const { data, error } = await supabaseAdmin
-        .from(TABLES[collection])
-        .select('id,data,created_at,updated_at')
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      return ((data || []) as DataRow<CollectionModel[C]>[]).map((row) => ({
-        ...clone(row.data),
-        id: row.id,
-      } as CollectionModel[C]));
-    }
-
     if (this.usePostgres) {
       const { rows } = await (await getPool()).query(
         `select id, data from "${pgTableName(collection)}" order by created_at desc`
@@ -321,20 +302,10 @@ export class RestaurantStore {
       }));
     }
 
-    return clone(memory[collection] as CollectionModel[C][]);
+    return clone(this.memory[collection] as unknown as CollectionModel[C][]);
   }
 
   private async getInternal<C extends StoreCollection>(collection: C, id: string): Promise<CollectionModel[C] | null> {
-    if (this.useSupabase && supabaseAdmin) {
-      const { data, error } = await supabaseAdmin
-        .from(TABLES[collection])
-        .select('id,data')
-        .eq('id', id)
-        .maybeSingle();
-      if (error) throw error;
-      return data ? ({ ...clone((data as DataRow<CollectionModel[C]>).data), id: data.id } as CollectionModel[C]) : null;
-    }
-
     if (this.usePostgres) {
       const { rows } = await (await getPool()).query(
         `select id, data from "${pgTableName(collection)}" where id = $1 limit 1`,
@@ -344,22 +315,12 @@ export class RestaurantStore {
       return row ? { ...clone(row.data), id: row.id } : null;
     }
 
-    const record = (memory[collection] as CollectionModel[C][]).find((item) => item.id === id);
+    const record = (this.memory[collection] as unknown as CollectionModel[C][]).find((item) => item.id === id);
     return record ? clone(record) : null;
   }
 
   private async putInternal<C extends StoreCollection>(collection: C, id: string, record: CollectionModel[C]) {
     const value = { ...clone(record), id };
-    if (this.useSupabase && supabaseAdmin) {
-      const timestamp = now();
-      const { error } = await supabaseAdmin.from(TABLES[collection]).upsert(
-        { id, data: value, updated_at: timestamp, created_at: timestamp },
-        { onConflict: 'id' }
-      );
-      if (error) throw error;
-      return value;
-    }
-
     if (this.usePostgres) {
       const timestamp = now();
       await (await getPool()).query(
@@ -371,10 +332,11 @@ export class RestaurantStore {
       return value;
     }
 
-    const records = memory[collection] as CollectionModel[C][];
+    const records = this.memory[collection] as unknown as CollectionModel[C][];
     const index = records.findIndex((item) => item.id === id);
     if (index === -1) records.unshift(value);
     else records[index] = value;
+    await this.persist();
     return value;
   }
 
@@ -395,16 +357,12 @@ export class RestaurantStore {
 
   async remove(collection: StoreCollection, id: string) {
     await this.ensureReady();
-    if (this.useSupabase && supabaseAdmin) {
-      const { error } = await supabaseAdmin.from(TABLES[collection]).delete().eq('id', id);
-      if (error) throw error;
-      return;
-    }
     if (this.usePostgres) {
       await (await getPool()).query(`delete from "${pgTableName(collection)}" where id = $1`, [id]);
       return;
     }
-    memory[collection] = (memory[collection] as Array<{ id: string }>).filter((item) => item.id !== id) as never;
+    this.memory[collection] = (this.memory[collection] as unknown as Array<{ id: string }>).filter((item) => item.id !== id) as never;
+    await this.persist();
   }
 
   async getSettings(): Promise<CafeSettings> {
@@ -413,27 +371,14 @@ export class RestaurantStore {
   }
 
   private async getSettingsInternal(): Promise<CafeSettings | null> {
-    if (this.useSupabase && supabaseAdmin) {
-      const { data, error } = await supabaseAdmin.from('app_settings').select('data').eq('id', 'config').maybeSingle();
-      if (error) throw error;
-      return data ? clone((data as DataRow<CafeSettings>).data) : null;
-    }
     if (this.usePostgres) {
       const { rows } = await (await getPool()).query(`select data from app_settings where id = 'config' limit 1`);
       return rows[0] ? clone(rows[0].data as CafeSettings) : null;
     }
-    return clone(memory.settings);
+    return clone(this.memory.settings);
   }
 
   private async putSettingsInternal(settings: CafeSettings): Promise<CafeSettings> {
-    if (this.useSupabase && supabaseAdmin) {
-      const timestamp = now();
-      const { error } = await supabaseAdmin
-        .from('app_settings')
-        .upsert({ id: 'config', data: settings, updated_at: timestamp }, { onConflict: 'id' });
-      if (error) throw error;
-      return clone(settings);
-    }
     if (this.usePostgres) {
       const timestamp = now();
       await (await getPool()).query(
@@ -444,7 +389,8 @@ export class RestaurantStore {
       );
       return clone(settings);
     }
-    memory.settings = clone(settings);
+    this.memory.settings = clone(settings);
+    await this.persist();
     return clone(settings);
   }
 
@@ -469,39 +415,23 @@ export class RestaurantStore {
 
   async nextOrderNumber(): Promise<number> {
     await this.ensureReady();
-    if (this.useSupabase && supabaseAdmin) {
-      const { data, error } = await supabaseAdmin.rpc('next_order_number');
-      if (error) throw new Error(`Supabase order counter is unavailable. Run supabase/schema.sql: ${error.message}`);
-      return Number(data);
-    }
     if (this.usePostgres) {
       try {
         const { rows } = await (await getPool()).query(`select next_order_number() as value`);
         return Number(rows[0]?.value);
       } catch (error) {
-        throw new Error(`Postgres order counter is unavailable. Run supabase/schema.sql: ${(error as Error).message}`);
+        throw new Error(`Postgres order counter is unavailable. Run db/schema.sql: ${(error as Error).message}`);
       }
     }
-    memoryCounter += 1;
-    return memoryCounter;
+    this.memory.counters.orders += 1;
+    const next = this.memory.counters.orders;
+    await this.persist();
+    return next;
   }
 
-  async uploadImage(dataUrl: string, productId: string): Promise<string> {
-    if (!supabaseAdmin || !this.useSupabase || !dataUrl.startsWith('data:image/')) return dataUrl;
-    const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-    if (!match) throw new Error('Invalid image data.');
-
-    const contentType = match[1].toLowerCase() === 'image/jpg' ? 'image/jpeg' : match[1].toLowerCase();
-    const extension = contentType.split('/')[1].replace('svg+xml', 'svg');
-    const objectPath = `products/${productId}-${crypto.randomBytes(5).toString('hex')}.${extension}`;
-    const { error } = await supabaseAdmin.storage.from('product-images').upload(objectPath, Buffer.from(match[2], 'base64'), {
-      contentType,
-      cacheControl: '31536000',
-      upsert: false,
-    });
-    if (error) throw error;
-    const { data } = supabaseAdmin.storage.from('product-images').getPublicUrl(objectPath);
-    return data.publicUrl;
+  async uploadImage(dataUrl: string, _productId: string): Promise<string> {
+    // No cloud storage — product images are stored with the product (data URL).
+    return dataUrl;
   }
 }
 
@@ -509,12 +439,4 @@ export const store = new RestaurantStore();
 
 export function newId(prefix: string) {
   return `${prefix}-${crypto.randomBytes(8).toString('hex')}`;
-}
-
-export function getSupabasePublicConfig() {
-  return {
-    url: config.url,
-    anonKey: config.publicAnonKey,
-    configured: supabaseConfigured,
-  };
 }

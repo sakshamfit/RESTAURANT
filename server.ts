@@ -15,38 +15,24 @@ import {
   SalesSummary,
   WaiterCall,
 } from './src/types';
-import {
-  getSupabasePublicConfig,
-  store,
-  supabaseAdmin,
-  supabaseConfigured,
-  postgresConfigured,
-  newId,
-} from './src/server/store';
+import { store, postgresConfigured, newId } from './src/server/store';
 import { initialSettings } from './src/server/seed';
+import { changeAdminPassword, getAdminEmail, getAdminSessionSecret, initAdminAuth, verifyAdminPassword } from './src/server/auth';
 
 dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const fallbackAdminEmail = process.env.ADMIN_EMAIL || 'admin@nagoritea.com';
-const fallbackAdminPassword = process.env.ADMIN_PASSWORD || '9852120609@';
+const adminEmail = getAdminEmail();
 const clientOrderTimestamps = new Map<string, number>();
 
 // ── Admin sessions ───────────────────────────────────────────────────────────
-// There is exactly one admin (ADMIN_EMAIL / ADMIN_PASSWORD) and exactly one way
-// to log in: /api/admin/login with that password — the same in every
-// persistence mode (Supabase API, direct Postgres, memory preview). Sessions
-// are HMAC-signed tokens with a 7-day expiry, verified locally (no network
-// round-trip per request) and surviving server restarts.
+// There is exactly one admin and exactly one way to log in: /api/admin/login
+// with the single admin password (stored locally in data/admin.json — no cloud
+// service is involved). Sessions are HMAC-signed tokens with a 7-day expiry,
+// verified locally (no network round-trip per request) and surviving restarts.
 const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const envSessionSecret = process.env.ADMIN_SESSION_SECRET || '';
-const adminSessionSecret =
-  envSessionSecret.length >= 16
-    ? envSessionSecret
-    : crypto.createHash('sha256')
-        .update(`nagori-chai-admin-session-v1:${fallbackAdminEmail}:${fallbackAdminPassword}`)
-        .digest('hex');
+const adminSessionSecret = getAdminSessionSecret();
 
 function signAdminToken(email: string) {
   const payload = Buffer.from(JSON.stringify({ sub: 'admin', email, iat: Date.now(), exp: Date.now() + ADMIN_SESSION_TTL_MS })).toString('base64url');
@@ -75,9 +61,7 @@ function verifyAdminToken(token: string): { email?: string } | null {
 }
 
 function passwordsMatch(password: string) {
-  const given = Buffer.from(password);
-  const expected = Buffer.from(fallbackAdminPassword);
-  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+  return verifyAdminPassword(password);
 }
 
 // Coarse login rate limit: 10 failed attempts per IP per 15 minutes.
@@ -160,7 +144,7 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   if (!token) return jsonError(res, 401, 'Unauthorized: Missing admin session.');
   const session = verifyAdminToken(token);
   if (!session) return jsonError(res, 401, 'Unauthorized: Admin session is invalid or expired. Please log in again.');
-  (req as Request & { adminUser?: { email?: string } }).adminUser = { email: session.email || fallbackAdminEmail };
+  (req as Request & { adminUser?: { email?: string } }).adminUser = { email: session.email || adminEmail };
   next();
 }
 
@@ -197,7 +181,7 @@ async function sendWhatsAppNotification(order: Order, settings: CafeSettings): P
   }
 
   // Without a gateway, the notification is considered delivered to the configured
-  // direct-link workflow; the order itself is always persisted in Supabase.
+  // direct-link workflow; the order itself is always persisted.
   return { success: true };
 }
 
@@ -206,16 +190,10 @@ app.get('/api/health', (_req, res) => {
     status: 'ok',
     app: 'Nagori Chai Point API',
     persistence: store.provider,
-    supabaseCredentialsConfigured: supabaseConfigured,
     postgresConfigured,
-    storage: store.provider === 'supabase' ? 'supabase-storage' : store.provider === 'postgres' ? 'inline-data-url' : 'memory-preview',
+    storage: store.provider === 'postgres' ? 'database' : 'local-json-file',
     timestamp: new Date().toISOString(),
   });
-});
-
-app.get('/api/config', (_req, res) => {
-  const publicConfig = getSupabasePublicConfig();
-  res.json({ supabaseUrl: publicConfig.url, supabaseAnonKey: publicConfig.anonKey, configured: publicConfig.configured });
 });
 
 // ----------------------------------------------------
@@ -401,9 +379,9 @@ app.post('/api/feedback', async (req, res) => {
 // ----------------------------------------------------
 // Single admin login + protected admin APIs
 // ----------------------------------------------------
-// The one and only login: the single admin password (ADMIN_PASSWORD). It works
-// identically in every persistence mode (Supabase API, direct Postgres, memory
-// preview), and the returned signed session survives server restarts.
+// The one and only login: the single admin password, stored locally in
+// data/admin.json (no cloud auth service). It works no matter the persistence
+// mode, and the returned signed session survives server restarts.
 app.post('/api/admin/login', (req, res) => {
   const password = getIdentifier(req.body?.password);
   const ip = req.ip || req.socket.remoteAddress || 'unknown';
@@ -417,14 +395,14 @@ app.post('/api/admin/login', (req, res) => {
 
   res.json({
     success: true,
-    token: signAdminToken(fallbackAdminEmail),
+    token: signAdminToken(adminEmail),
     expiresAt: new Date(Date.now() + ADMIN_SESSION_TTL_MS).toISOString(),
-    admin: { email: fallbackAdminEmail },
+    admin: { email: adminEmail },
   });
 });
 
 app.get('/api/admin/me', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
-  res.json({ email: req.adminUser?.email || fallbackAdminEmail, cafeName: (await store.getSettings()).cafeName });
+  res.json({ email: req.adminUser?.email || adminEmail, cafeName: (await store.getSettings()).cafeName });
 });
 
 // Sessions are stateless (signed tokens), so logging out is a client-side
@@ -696,7 +674,7 @@ app.get('/api/admin/reports', requireAdminAuth, async (req, res) => {
 });
 
 app.get('/api/admin/settings', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
-  res.json({ settings: await store.getSettings(), adminEmail: req.adminUser?.email || fallbackAdminEmail });
+  res.json({ settings: await store.getSettings(), adminEmail: req.adminUser?.email || adminEmail });
 });
 
 app.put('/api/admin/settings', requireAdminAuth, async (req, res) => {
@@ -707,21 +685,26 @@ app.put('/api/admin/settings', requireAdminAuth, async (req, res) => {
   res.json({ success: true, settings });
 });
 
-// The admin password is the single ADMIN_PASSWORD from the environment — it
-// cannot be changed at runtime; update ADMIN_PASSWORD in .env and restart.
-app.post('/api/admin/change-password', requireAdminAuth, (req, res) => {
-  const currentPassword = getIdentifier(req.body?.currentPassword);
-  if (!passwordsMatch(currentPassword)) return jsonError(res, 401, 'Current password is incorrect.');
-  res.json({
-    success: true,
-    message: 'Current password verified. The admin password is managed via the ADMIN_PASSWORD environment variable — update it in .env and restart the server to change it.',
-  });
+// Change the single admin password. It is saved locally (data/admin.json) and
+// takes effect immediately — no restart and no cloud service needed.
+app.post('/api/admin/change-password', requireAdminAuth, async (req, res) => {
+  try {
+    const currentPassword = getIdentifier(req.body?.currentPassword);
+    const newPassword = getIdentifier(req.body?.newPassword);
+    const result = await changeAdminPassword(currentPassword, newPassword);
+    if (!result.ok) return jsonError(res, 401, result.message);
+    res.json({ success: true, message: result.message });
+  } catch (error: any) {
+    console.error('Change password error:', error);
+    jsonError(res, 500, error?.message || 'Failed to update the admin password.');
+  }
 });
 
 // ----------------------------------------------------
 // Vite middleware / production static server
 // ----------------------------------------------------
 async function startServer() {
+  await initAdminAuth();
   await store.waitUntilReady();
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -740,14 +723,10 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Nagori Chai Point server running on http://0.0.0.0:${PORT} (persistence: ${store.provider})`);
-    if (store.provider === 'supabase') {
-      console.log('Persistence: Supabase (PostgREST + Realtime + Storage).');
-    } else if (store.provider === 'postgres') {
+    if (store.provider === 'postgres') {
       console.log(`Persistence: direct Postgres via DATABASE_URL (${new URL(pgUrlSafe()).host}).`);
-    } else if (supabaseConfigured || postgresConfigured) {
-      console.warn('Persistence is configured but unreachable in this environment; running with memory-only preview data.');
     } else {
-      console.warn('No persistence configured (add Supabase keys or DATABASE_URL); this preview is memory-only.');
+      console.log('Persistence: local file data/restaurant.json. No cloud services used.');
     }
   });
 }

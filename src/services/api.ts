@@ -8,7 +8,6 @@ import {
   PaymentStatus,
   SalesSummary,
 } from '../types';
-import { clearSupabaseSession, setSupabaseSession } from '../lib/supabase';
 
 const API_BASE = '/api';
 
@@ -174,8 +173,6 @@ export const api = {
     const data = await res.json();
     if (data.token) {
       localStorage.setItem('nagori_admin_token', data.token);
-      if (data.refreshToken) localStorage.setItem('nagori_admin_refresh_token', data.refreshToken);
-      await setSupabaseSession(data.token, data.refreshToken);
     }
     return data;
   },
@@ -200,8 +197,6 @@ export const api = {
       // Ignore
     }
     localStorage.removeItem('nagori_admin_token');
-    localStorage.removeItem('nagori_admin_refresh_token');
-    clearSupabaseSession();
   },
 
   // Admin Orders
