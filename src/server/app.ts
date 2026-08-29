@@ -29,6 +29,32 @@ const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const adminSessionSecret = getAdminSessionSecret();
 const adminEmail = getAdminEmail();
 const clientOrderTimestamps = new Map<string, number>();
+const ORDER_THROTTLE_MS = 3000;
+// Throttle state is deliberately bounded. Both maps used to keep one entry per
+// client IP forever, which is a slow leak that shows up as a backend degrading
+// and flapping the longer it runs. Expired entries are swept and the size capped.
+const MAX_TRACKED_CLIENTS = 1000;
+
+function dropOldest(map: Map<string, unknown>, count: number) {
+  let remaining = count;
+  for (const key of map.keys()) {
+    if (remaining <= 0) break;
+    map.delete(key);
+    remaining -= 1;
+  }
+}
+
+function rememberOrderAttempt(ip: string, now: number) {
+  if (clientOrderTimestamps.size >= MAX_TRACKED_CLIENTS) {
+    for (const [key, at] of clientOrderTimestamps) {
+      if (now - at > ORDER_THROTTLE_MS) clientOrderTimestamps.delete(key);
+    }
+  }
+  if (clientOrderTimestamps.size >= MAX_TRACKED_CLIENTS) {
+    dropOldest(clientOrderTimestamps, Math.ceil(MAX_TRACKED_CLIENTS / 2));
+  }
+  clientOrderTimestamps.set(ip, now);
+}
 
 function signAdminToken(email: string) {
   const payload = Buffer.from(JSON.stringify({ sub: 'admin', email, iat: Date.now(), exp: Date.now() + ADMIN_SESSION_TTL_MS })).toString('base64url');
@@ -72,12 +98,21 @@ function loginRateLimited(ip: string) {
 }
 
 function recordLoginFailure(ip: string) {
+  const now = Date.now();
   const entry = loginFailures.get(ip);
-  if (!entry || Date.now() - entry.windowStart > LOGIN_WINDOW_MS) {
-    loginFailures.set(ip, { count: 1, windowStart: Date.now() });
-  } else {
+  if (entry && now - entry.windowStart <= LOGIN_WINDOW_MS) {
     entry.count += 1;
+    return;
   }
+  if (loginFailures.size >= MAX_TRACKED_CLIENTS) {
+    for (const [key, stale] of loginFailures) {
+      if (now - stale.windowStart > LOGIN_WINDOW_MS) loginFailures.delete(key);
+    }
+  }
+  if (loginFailures.size >= MAX_TRACKED_CLIENTS) {
+    dropOldest(loginFailures, Math.ceil(MAX_TRACKED_CLIENTS / 2));
+  }
+  loginFailures.set(ip, { count: 1, windowStart: now });
 }
 
 function getIdentifier(value: unknown) {
@@ -242,9 +277,12 @@ export function createApp() {
   app.post('/api/orders', async (req, res) => {
     try {
       const ip = req.ip || req.socket.remoteAddress || 'unknown';
+      const now = Date.now();
       const lastOrderTime = clientOrderTimestamps.get(ip) || 0;
-      if (Date.now() - lastOrderTime < 3000) return jsonError(res, 429, 'Order submission in progress. Please wait a few seconds.');
-      clientOrderTimestamps.set(ip, Date.now());
+      if (now - lastOrderTime < ORDER_THROTTLE_MS) {
+        return jsonError(res, 429, 'Order submission in progress. Please wait a few seconds.');
+      }
+      rememberOrderAttempt(ip, now);
 
       const { tableToken, tableId, tableNumber, tableName, customerName, customerPhone, specialInstructions, items } = req.body || {};
       if (!customerName || typeof customerName !== 'string' || !customerName.trim()) return jsonError(res, 400, 'Customer name is required.');
