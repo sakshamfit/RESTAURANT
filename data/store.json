@@ -1,0 +1,303 @@
+{
+  "settings": {
+    "cafeName": "Nagori Chai Point",
+    "tagline": "Authentic Chai, Fresh Snacks & Quick Bites",
+    "address": "Near City Center, Main Road",
+    "phone": "+91 9852120609",
+    "whatsappNumber": "9852120609",
+    "currency": "₹",
+    "upiId": "9852120609@upi",
+    "enableWhatsAppAlerts": true,
+    "whatsappApiUrl": "",
+    "whatsappApiToken": "",
+    "enableSoundAlerts": true
+  },
+  "admin": {
+    "email": "ra7650384@gmail.com",
+    "passwordHash": "fa24d62d44d5e146fbb60ea20992237d796464716ce694493255ea06c8f5f8e943b047f34cfc9c9b596469ca46df5a2c47f4c27902adb7441c0b7482e5e65ab6",
+    "salt": "fd61333a1e5fdbeacdda6259fcfff20d"
+  },
+  "categories": [
+    {
+      "id": "cat-tea-coffee",
+      "name": "Tea & Coffee",
+      "displayOrder": 1
+    },
+    {
+      "id": "cat-snacks",
+      "name": "Snacks",
+      "displayOrder": 2
+    },
+    {
+      "id": "cat-cold-drinks",
+      "name": "Cold Drinks & Water",
+      "displayOrder": 2
+    },
+    {
+      "id": "cat-burgers",
+      "name": "Burgers",
+      "displayOrder": 3
+    },
+    {
+      "id": "cat-momos",
+      "name": "Momos",
+      "displayOrder": 4
+    },
+    {
+      "id": "cat-chinese",
+      "name": "Chinese",
+      "displayOrder": 5
+    }
+  ],
+  "tables": [
+    {
+      "id": "tbl-1",
+      "tableNumber": 1,
+      "name": "Table 1",
+      "token": "nagori_tbl_tok_table1_9a2f7c",
+      "isActive": true,
+      "createdAt": "2026-08-19T19:27:24.172Z"
+    },
+    {
+      "id": "tbl-2",
+      "tableNumber": 2,
+      "name": "Table 2",
+      "token": "nagori_tbl_tok_table2_4b8e1d",
+      "isActive": true,
+      "createdAt": "2026-08-19T19:27:24.173Z"
+    },
+    {
+      "id": "tbl-3",
+      "tableNumber": 3,
+      "name": "Table 3",
+      "token": "nagori_tbl_tok_table3_7c3a9f",
+      "isActive": true,
+      "createdAt": "2026-08-19T19:27:24.173Z"
+    },
+    {
+      "id": "tbl-4",
+      "tableNumber": 4,
+      "name": "Table 4",
+      "token": "nagori_tbl_tok_table4_1f5e8b",
+      "isActive": true,
+      "createdAt": "2026-08-19T19:27:24.173Z"
+    },
+    {
+      "id": "tbl-5",
+      "tableNumber": 5,
+      "name": "Table 5",
+      "token": "nagori_tbl_tok_table5_3d6a2c",
+      "isActive": true,
+      "createdAt": "2026-08-19T19:27:24.173Z"
+    },
+    {
+      "id": "tbl-6",
+      "tableNumber": 6,
+      "name": "Table 6",
+      "token": "nagori_tbl_tok_table6_8e0b4f",
+      "isActive": true,
+      "createdAt": "2026-08-19T19:27:24.173Z"
+    }
+  ],
+  "products": [
+    {
+      "id": "prod-samosa",
+      "name": "Samosa",
+      "description": "Crispy, golden-fried pastry stuffed with spiced potatoes and peas. Served with tangy mint and sweet tamarind chutneys.",
+      "category": "Snacks",
+      "image": "",
+      "isAvailable": true,
+      "hasVariants": false,
+      "basePrice": 10,
+      "displayOrder": 1,
+      "createdAt": "2026-08-19T19:27:24.173Z",
+      "updatedAt": "2026-08-19T19:27:24.173Z",
+      "isVeg": true
+    },
+    {
+      "id": "prod-tea",
+      "name": "Tea",
+      "description": "Nagori special kadak masala chai prepared with whole spices, fresh ginger, cardamom, and creamy milk.",
+      "category": "Tea & Coffee",
+      "image": "",
+      "isAvailable": true,
+      "hasVariants": false,
+      "basePrice": 10,
+      "displayOrder": 2,
+      "createdAt": "2026-08-19T19:27:24.173Z",
+      "updatedAt": "2026-08-19T19:27:24.173Z",
+      "isVeg": true
+    },
+    {
+      "id": "prod-coffee",
+      "name": "Coffee",
+      "description": "Aromatic freshly brewed hot filter coffee whipped to frothy perfection with rich milk.",
+      "category": "Tea & Coffee",
+      "image": "",
+      "isAvailable": true,
+      "hasVariants": false,
+      "basePrice": 30,
+      "displayOrder": 3,
+      "createdAt": "2026-08-19T19:27:24.173Z",
+      "updatedAt": "2026-08-19T19:27:24.173Z",
+      "isVeg": true
+    },
+    {
+      "id": "prod-cold-drink",
+      "name": "Cold Drink (Chilled 250ml)",
+      "description": "Chilled refreshing cold drink can/bottle (Thums Up, Coca Cola, Sprite, Maaza).",
+      "category": "Cold Drinks & Water",
+      "image": "",
+      "isAvailable": true,
+      "isVeg": true,
+      "hasVariants": false,
+      "basePrice": 20,
+      "displayOrder": 3,
+      "createdAt": "2026-08-29T06:36:05.651Z",
+      "updatedAt": "2026-08-29T06:36:05.651Z"
+    },
+    {
+      "id": "prod-burger",
+      "name": "Burger",
+      "description": "Crispy spiced vegetable aloo tikki in a toasted sesame bun with sliced onions, crunchy cabbage, and house sauces.",
+      "category": "Burgers",
+      "image": "",
+      "isAvailable": true,
+      "hasVariants": false,
+      "basePrice": 50,
+      "displayOrder": 4,
+      "createdAt": "2026-08-19T19:27:24.173Z",
+      "updatedAt": "2026-08-19T19:27:24.173Z",
+      "isVeg": true
+    },
+    {
+      "id": "prod-water-bottle",
+      "name": "Packaged Drinking Water",
+      "description": "Pure and sealed mineral drinking water bottle chilled to perfection.",
+      "category": "Cold Drinks & Water",
+      "image": "",
+      "isAvailable": true,
+      "isVeg": true,
+      "hasVariants": true,
+      "variants": [
+        {
+          "id": "var-water-500ml",
+          "name": "500ml Bottle",
+          "price": 10
+        },
+        {
+          "id": "var-water-1ltr",
+          "name": "1 Litre Bottle",
+          "price": 20
+        }
+      ],
+      "displayOrder": 4,
+      "createdAt": "2026-08-29T06:36:05.651Z",
+      "updatedAt": "2026-08-29T06:36:05.651Z"
+    },
+    {
+      "id": "prod-momos",
+      "name": "Momos",
+      "description": "Authentic Himalayan steamed dumplings stuffed with seasoned fresh vegetables. Served with fiery red chili garlic dip.",
+      "category": "Momos",
+      "image": "",
+      "isAvailable": true,
+      "hasVariants": true,
+      "variants": [
+        {
+          "id": "var-momos-half",
+          "name": "Half (5 Pcs)",
+          "price": 80
+        },
+        {
+          "id": "var-momos-full",
+          "name": "Full (10 Pcs)",
+          "price": 150
+        }
+      ],
+      "displayOrder": 5,
+      "createdAt": "2026-08-19T19:27:24.173Z",
+      "updatedAt": "2026-08-19T19:27:24.173Z",
+      "isVeg": true
+    },
+    {
+      "id": "prod-chowmein",
+      "name": "Chow Mein",
+      "description": "Street-style wok-tossed noodles loaded with crunchy julienned bell peppers, shredded cabbage, carrots, and savory sauces.",
+      "category": "Chinese",
+      "image": "",
+      "isAvailable": true,
+      "hasVariants": true,
+      "variants": [
+        {
+          "id": "var-chowmein-half",
+          "name": "Half Plate",
+          "price": 80
+        },
+        {
+          "id": "var-chowmein-full",
+          "name": "Full Plate",
+          "price": 150
+        }
+      ],
+      "displayOrder": 6,
+      "createdAt": "2026-08-19T19:27:24.173Z",
+      "updatedAt": "2026-08-19T19:27:24.173Z",
+      "isVeg": true
+    },
+    {
+      "id": "prod-momos-veg",
+      "name": "Veg Steamed Momos",
+      "description": "Authentic Himalayan dumplings stuffed with freshly seasoned cabbage, carrots, paneer, and herbs. Served with fiery spicy red chili chutney.",
+      "category": "Momos",
+      "image": "",
+      "isAvailable": true,
+      "isVeg": true,
+      "hasVariants": true,
+      "variants": [
+        {
+          "id": "var-veg-momos-half",
+          "name": "Half (5 Pcs)",
+          "price": 50
+        },
+        {
+          "id": "var-veg-momos-full",
+          "name": "Full (10 Pcs)",
+          "price": 90
+        }
+      ],
+      "displayOrder": 7,
+      "createdAt": "2026-08-29T06:36:05.651Z",
+      "updatedAt": "2026-08-29T06:36:05.651Z"
+    },
+    {
+      "id": "prod-momos-nonveg",
+      "name": "Non-Veg Chicken Momos",
+      "description": "Juicy minced chicken infused with ginger, garlic, and special spices inside delicate steamed dumpling wrappers. Served with hot momo dip.",
+      "category": "Momos",
+      "image": "",
+      "isAvailable": true,
+      "isVeg": false,
+      "hasVariants": true,
+      "variants": [
+        {
+          "id": "var-nv-momos-half",
+          "name": "Half (5 Pcs)",
+          "price": 70
+        },
+        {
+          "id": "var-nv-momos-full",
+          "name": "Full (10 Pcs)",
+          "price": 130
+        }
+      ],
+      "displayOrder": 8,
+      "createdAt": "2026-08-29T06:36:05.651Z",
+      "updatedAt": "2026-08-29T06:36:05.651Z"
+    }
+  ],
+  "orders": [],
+  "orderCounter": 1000,
+  "feedbacks": [],
+  "waiterCalls": []
+}

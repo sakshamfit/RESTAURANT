@@ -1,0 +1,131 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    color: #292827;
+    background-color: #fafaf8;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+html, body {
+  -webkit-text-size-adjust: 100%;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+  overflow-x: hidden;
+  max-width: 100vw;
+  width: 100%;
+  min-height: 100%;
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Prevent iOS Safari from zooming in on input focus by ensuring at least 16px on mobile */
+@media screen and (max-width: 768px) {
+  input, select, textarea {
+    font-size: 16px !important;
+  }
+}
+
+@layer utilities {
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-none {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  /* Warm Chai Orange Design System Tokens */
+  .bg-primary-orange {
+    background-color: #ea580c;
+  }
+  .bg-primary-dark {
+    background-color: #1e130c;
+  }
+  .bg-primary-deep {
+    background-color: #140c07;
+  }
+  .bg-canvas-soft {
+    background-color: #faf8f5;
+  }
+  .bg-orange-soft {
+    background-color: #fed7aa;
+  }
+  .bg-amber-deep {
+    background-color: #2a1b12;
+  }
+  .border-hairline {
+    border-color: #e7e2dc;
+  }
+  .border-hairline-dark {
+    border-color: #452c1e;
+  }
+  .text-ink {
+    color: #292524;
+  }
+  .text-ink-mute {
+    color: #78716c;
+  }
+  .text-ink-faint {
+    color: #a8a29e;
+  }
+  .text-orange-soft {
+    color: #fed7aa;
+  }
+  .text-on-dark-mute {
+    color: #e2d9d2;
+  }
+  .text-on-dark-faint {
+    color: #8c786a;
+  }
+
+  /* Atmospheric Orange Backdrop */
+  .hero-backdrop-atmospheric {
+    background: radial-gradient(circle at 85% 20%, rgba(249, 115, 22, 0.25) 0%, rgba(42, 27, 18, 0.95) 45%, #1e130c 100%);
+  }
+
+  .orange-backdrop-atmospheric {
+    background: radial-gradient(circle at 10% 50%, rgba(234, 88, 12, 0.35) 0%, #1e130c 100%);
+  }
+}
+
+@keyframes bounceShort {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+
+.animate-bounce-short {
+  animation: bounceShort 2s ease-in-out infinite;
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #printable-qr-standee, #printable-qr-standee * {
+    visibility: visible;
+  }
+  #printable-qr-standee {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100% !important;
+    max-width: 400px !important;
+    margin: 0 auto;
+    border: none !important;
+    box-shadow: none !important;
+  }
+}

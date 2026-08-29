@@ -1,0 +1,10 @@
+{
+  "name": "Nagori Chai Point",
+  "description": "Production-ready QR-based café food ordering web app with permanent table QR codes, live order tracking, WhatsApp notification integration, waiter call alerts, customer reviews, and complete admin dashboard.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
