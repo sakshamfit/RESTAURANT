@@ -1,4 +1,3 @@
-import { Client, ClientConfig, Pool, PoolConfig } from 'pg';
 import net from 'net';
 import crypto from 'crypto';
 import path from 'path';
@@ -39,9 +38,6 @@ const TABLES: Record<StoreCollection, string> = {
 };
 
 // ── Local JSON file persistence (default, no cloud needed) ──────────────────
-// DATA_DIR can be overridden (Vercel sets it to /tmp/restaurant-data, which is
-// the only writable location on serverless instances). If the filesystem is
-// read-only the store falls back to in-memory so the app never crashes.
 const DATA_DIR =
   process.env.DATA_DIR ||
   (process.env.VERCEL ? '/tmp/restaurant-data' : path.join(process.cwd(), 'data'));
@@ -58,10 +54,9 @@ type DataFile = {
   counters: { orders: number };
 };
 
-// ── Direct Postgres persistence (optional) ──────────────────────────────────
-// When DATABASE_URL is present the app talks to the database directly (pg driver,
-// JSONB document tables from db/schema.sql). If the database is unreachable the
-// app falls back to the local JSON file so it always boots and login always works.
+// ── Direct Postgres persistence (optional, lazy-loaded) ─────────────────────
+// pg is imported dynamically only when DATABASE_URL is set, so the module
+// never fails to load on platforms like Vercel where pg may not be bundled.
 const pgUrl = process.env.DATABASE_URL || '';
 const pgDirectUrl = process.env.DIRECT_URL || pgUrl;
 export const postgresConfigured = Boolean(pgUrl);
@@ -69,13 +64,23 @@ export const postgresConfigured = Boolean(pgUrl);
 const PG_FAMILY = 4;
 const PG_TIMEOUT_MS = Number(process.env.PG_CONNECT_TIMEOUT_MS || 15000);
 
-let pgPool: Pool | null = null;
+// Lazy-loaded pg types & instances
+let pgModule: typeof import('pg') | null = null;
+let pgPool: any = null;
 let pgSslResolved: 'tls' | 'none' | null = null;
+
+async function loadPg(): Promise<typeof import('pg')> {
+  if (!pgModule) {
+    pgModule = await import('pg');
+  }
+  return pgModule;
+}
 
 async function resolvePgSsl(): Promise<'tls' | 'none'> {
   if (pgSslResolved) return pgSslResolved;
+  const { Client } = await loadPg();
   try {
-    const probe = new Client(pgClientOptions({ ssl: { rejectUnauthorized: false } }) as unknown as ClientConfig);
+    const probe = new Client(pgClientOptions({ ssl: { rejectUnauthorized: false } }));
     await probe.connect();
     await probe.end();
     pgSslResolved = 'tls';
@@ -89,8 +94,6 @@ async function resolvePgSsl(): Promise<'tls' | 'none'> {
   return pgSslResolved;
 }
 
-// node-postgres creates its socket without options, so a `family` setting in the
-// client config is silently ignored. We pass a socket factory that forces IPv4.
 function ipv4SocketFactory() {
   return () => {
     const socket = new net.Socket();
@@ -114,15 +117,16 @@ function pgClientOptions(extra?: PgOptions): PgOptions {
   return { ...base, ...extra };
 }
 
-function pgPoolOptions(): PoolConfig {
-  return pgClientOptions({ max: 10 }) as unknown as PoolConfig;
+function pgPoolOptions(): PgOptions {
+  return pgClientOptions({ max: 10 });
 }
 
-async function getPool(): Promise<Pool> {
+async function getPool(): Promise<any> {
   if (!pgPool) {
     await resolvePgSsl();
+    const { Pool } = await loadPg();
     pgPool = new Pool(pgPoolOptions());
-    pgPool.on('error', (error) => {
+    pgPool.on('error', (error: any) => {
       console.warn('Postgres pool idle client error:', error.message);
     });
   }
@@ -159,7 +163,6 @@ export class RestaurantStore {
   private ready: Promise<void>;
   private usePostgres = postgresConfigured;
   private memory: DataFile;
-  /** True when the filesystem is not writable and we keep everything in memory. */
   private ephemeral = false;
 
   constructor() {
@@ -252,10 +255,6 @@ export class RestaurantStore {
     console.log('[store] Persistence: local file data/restaurant.json (no cloud services).');
   }
 
-  /**
-   * Verifies the app tables exist; on a fresh database it applies
-   * db/schema.sql once over a single direct connection.
-   */
   private async ensurePostgresSchema() {
     const pool = await getPool();
     const { rows } = await pool.query(
@@ -266,6 +265,7 @@ export class RestaurantStore {
     const schemaPath = path.join(process.cwd(), 'db', 'schema.sql');
     const sql = await readFile(schemaPath, 'utf8');
     await resolvePgSsl();
+    const { Client } = await loadPg();
     const clientOptions: PgOptions = {
       connectionString: pgDirectUrl,
       family: PG_FAMILY,
@@ -273,7 +273,7 @@ export class RestaurantStore {
       connectionTimeoutMillis: 20000,
     };
     if (pgSslResolved === 'tls') clientOptions.ssl = { rejectUnauthorized: false };
-    const client = new Client(clientOptions as unknown as ClientConfig);
+    const client = new Client(clientOptions);
     await client.connect();
     try {
       await client.query(sql);
@@ -448,7 +448,6 @@ export class RestaurantStore {
   }
 
   async uploadImage(dataUrl: string, _productId: string): Promise<string> {
-    // No cloud storage — product images are stored with the product (data URL).
     return dataUrl;
   }
 }
