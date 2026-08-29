@@ -2,7 +2,10 @@ import {
   CafeCategory,
   CafeSettings,
   CafeTable,
+  CustomerFeedback,
+  Order,
   Product,
+  WaiterCall,
 } from '../types';
 
 const createdAt = '2026-01-01T00:00:00.000Z';
@@ -189,9 +192,9 @@ export interface AppSnapshot {
   categories: CafeCategory[];
   tables: CafeTable[];
   products: Product[];
-  orders: import('../types').Order[];
-  feedbacks: import('../types').CustomerFeedback[];
-  waiterCalls: import('../types').WaiterCall[];
+  orders: Order[];
+  feedbacks: CustomerFeedback[];
+  waiterCalls: WaiterCall[];
 }
 
 export function createMemorySnapshot(): AppSnapshot {
