@@ -8,7 +8,7 @@ import {
   PaymentStatus,
   SalesSummary,
 } from '../types';
-import { syncOrderToFirestore, syncFeedbackToFirestore, syncWaiterCallToFirestore } from '../lib/firebase';
+import { clearSupabaseSession, setSupabaseSession } from '../lib/supabase';
 
 const API_BASE = '/api';
 
@@ -74,9 +74,6 @@ export const api = {
       throw new Error(err.error || 'Failed to submit order.');
     }
     const data = await res.json();
-    if (data.order) {
-      syncOrderToFirestore(data.order).catch(() => {});
-    }
     return data;
   },
 
@@ -106,9 +103,6 @@ export const api = {
       throw new Error(err.error || 'Failed to call waiter.');
     }
     const data = await res.json();
-    if (data.call) {
-      syncWaiterCallToFirestore(data.call).catch(() => {});
-    }
     return data;
   },
 
@@ -131,9 +125,6 @@ export const api = {
       throw new Error(err.error || 'Failed to submit rating & feedback.');
     }
     const data = await res.json();
-    if (data.feedback) {
-      syncFeedbackToFirestore(data.feedback).catch(() => {});
-    }
     return data;
   },
 
@@ -153,9 +144,6 @@ export const api = {
     });
     if (!res.ok) throw new Error('Failed to update waiter call.');
     const data = await res.json();
-    if (data.call) {
-      syncWaiterCallToFirestore(data.call).catch(() => {});
-    }
     return data;
   },
 
@@ -186,6 +174,8 @@ export const api = {
     const data = await res.json();
     if (data.token) {
       localStorage.setItem('nagori_admin_token', data.token);
+      if (data.refreshToken) localStorage.setItem('nagori_admin_refresh_token', data.refreshToken);
+      await setSupabaseSession(data.token, data.refreshToken);
     }
     return data;
   },
@@ -210,6 +200,8 @@ export const api = {
       // Ignore
     }
     localStorage.removeItem('nagori_admin_token');
+    localStorage.removeItem('nagori_admin_refresh_token');
+    clearSupabaseSession();
   },
 
   // Admin Orders
@@ -246,9 +238,6 @@ export const api = {
       throw new Error(err.error || 'Failed to update order status.');
     }
     const data = await res.json();
-    if (data.order) {
-      syncOrderToFirestore(data.order).catch(() => {});
-    }
     return data;
   },
 
@@ -269,9 +258,6 @@ export const api = {
       throw new Error(err.error || 'Failed to update payment status.');
     }
     const data = await res.json();
-    if (data.order) {
-      syncOrderToFirestore(data.order).catch(() => {});
-    }
     return data;
   },
 

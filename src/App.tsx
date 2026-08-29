@@ -32,6 +32,7 @@ import { TableQRScannerModal } from './components/TableQRScannerModal';
 import { TableOrderHistoryModal } from './components/TableOrderHistoryModal';
 import { playCustomerOrderSuccessSound, sendBrowserNotification, requestNotificationPermission, unlockAudio } from './utils/audioAlerts';
 import { saveMyDeviceOrderId } from './utils/deviceOrders';
+import { setSupabaseSession } from './lib/supabase';
 
 export default function App() {
   // Navigation & View Mode
@@ -89,13 +90,15 @@ export default function App() {
     // Verify existing admin token if present
     const existingToken = localStorage.getItem('nagori_admin_token');
     if (existingToken) {
-      api
-        .adminGetMe()
+      setSupabaseSession(existingToken, localStorage.getItem('nagori_admin_refresh_token') || undefined)
+        .catch(() => {})
+        .then(() => api.adminGetMe())
         .then((res) => {
           setAdminLoggedInEmail(res.email);
         })
         .catch(() => {
           localStorage.removeItem('nagori_admin_token');
+          localStorage.removeItem('nagori_admin_refresh_token');
         })
         .finally(() => {
           setCheckingAuth(false);
