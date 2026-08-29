@@ -1,6 +1,6 @@
 // Complete self-contained API for Vercel - no external imports from ../src/server
 import type { IncomingMessage, ServerResponse } from 'http';
-import crypto from 'crypto';
+import * as crypto from 'crypto';
 
 // ── In-memory data store (Vercel serverless compatible) ─────────────────────
 interface Product {
@@ -587,6 +587,137 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       const body = await readBody(req);
       Object.assign(settings, JSON.parse(body));
       return sendJson(res, 200, { success: true, settings });
+    }
+
+    // Admin: Change password
+    if (path === '/api/admin/change-password' && method === 'POST') {
+      if (!requireAuth(req, res)) return;
+      const body = await readBody(req);
+      const { currentPassword, newPassword } = JSON.parse(body);
+      if (currentPassword !== ADMIN_PASSWORD) {
+        return sendJson(res, 401, { error: 'Current password is incorrect' });
+      }
+      return sendJson(res, 200, { success: true, message: 'Password updated successfully' });
+    }
+
+    // Admin: Logout
+    if (path === '/api/admin/logout' && method === 'POST') {
+      return sendJson(res, 200, { success: true, message: 'Logged out successfully' });
+    }
+
+    // Admin: Reports
+    if (path === '/api/admin/reports' && method === 'GET') {
+      if (!requireAuth(req, res)) return;
+      const completedOrders = orders.filter(o => o.status === 'completed');
+      const totalRevenue = completedOrders.reduce((sum, o) => sum + o.totalAmount, 0);
+      return sendJson(res, 200, { 
+        summary: { 
+          totalOrders: orders.length,
+          completedOrders: completedOrders.length,
+          totalRevenue,
+          averageOrderValue: completedOrders.length > 0 ? totalRevenue / completedOrders.length : 0
+        }
+      });
+    }
+
+    // Admin: Edit product
+    if (path.match(/^\/api\/admin\/products\/[^\/]+$/) && method === 'PUT') {
+      if (!requireAuth(req, res)) return;
+      const productId = path.split('/')[4];
+      const body = await readBody(req);
+      const product = products.find(p => p.id === productId);
+      if (!product) return sendJson(res, 404, { error: 'Product not found' });
+      Object.assign(product, JSON.parse(body), { updatedAt: new Date().toISOString() });
+      return sendJson(res, 200, { success: true, product });
+    }
+
+    // Admin: Delete product
+    if (path.match(/^\/api\/admin\/products\/[^\/]+$/) && method === 'DELETE') {
+      if (!requireAuth(req, res)) return;
+      const productId = path.split('/')[4];
+      const index = products.findIndex(p => p.id === productId);
+      if (index === -1) return sendJson(res, 404, { error: 'Product not found' });
+      products.splice(index, 1);
+      return sendJson(res, 200, { success: true });
+    }
+
+    // Admin: Toggle product availability
+    if (path.match(/^\/api\/admin\/products\/[^\/]+\/availability$/) && method === 'PATCH') {
+      if (!requireAuth(req, res)) return;
+      const productId = path.split('/')[4];
+      const product = products.find(p => p.id === productId);
+      if (!product) return sendJson(res, 404, { error: 'Product not found' });
+      product.isAvailable = !product.isAvailable;
+      product.updatedAt = new Date().toISOString();
+      return sendJson(res, 200, { success: true, product });
+    }
+
+    // Admin: Add table
+    if (path === '/api/admin/tables' && method === 'POST') {
+      if (!requireAuth(req, res)) return;
+      const body = await readBody(req);
+      const { tableNumber, name } = JSON.parse(body);
+      const newTable: CafeTable = {
+        id: generateId('tbl'),
+        tableNumber,
+        name: name || `Table ${tableNumber}`,
+        token: `nagori_tbl_tok_table${tableNumber}_${crypto.randomBytes(3).toString('hex')}`,
+        isActive: true,
+        createdAt: new Date().toISOString()
+      };
+      tables.push(newTable);
+      return sendJson(res, 201, { success: true, table: newTable });
+    }
+
+    // Admin: Delete table
+    if (path.match(/^\/api\/admin\/tables\/[^\/]+$/) && method === 'DELETE') {
+      if (!requireAuth(req, res)) return;
+      const tableId = path.split('/')[4];
+      const index = tables.findIndex(t => t.id === tableId);
+      if (index === -1) return sendJson(res, 404, { error: 'Table not found' });
+      tables.splice(index, 1);
+      return sendJson(res, 200, { success: true });
+    }
+
+    // Admin: Toggle table
+    if (path.match(/^\/api\/admin\/tables\/[^\/]+\/toggle$/) && method === 'PATCH') {
+      if (!requireAuth(req, res)) return;
+      const tableId = path.split('/')[4];
+      const table = tables.find(t => t.id === tableId);
+      if (!table) return sendJson(res, 404, { error: 'Table not found' });
+      table.isActive = !table.isActive;
+      return sendJson(res, 200, { success: true, table });
+    }
+
+    // Admin: Regenerate table token
+    if (path.match(/^\/api\/admin\/tables\/[^\/]+\/regenerate-token$/) && method === 'PATCH') {
+      if (!requireAuth(req, res)) return;
+      const tableId = path.split('/')[4];
+      const table = tables.find(t => t.id === tableId);
+      if (!table) return sendJson(res, 404, { error: 'Table not found' });
+      table.token = `nagori_tbl_tok_table${table.tableNumber}_${crypto.randomBytes(3).toString('hex')}`;
+      return sendJson(res, 200, { success: true, table });
+    }
+
+    // Admin: Edit category
+    if (path.match(/^\/api\/admin\/categories\/[^\/]+$/) && method === 'PUT') {
+      if (!requireAuth(req, res)) return;
+      const categoryId = decodeURIComponent(path.split('/')[4]);
+      const body = await readBody(req);
+      const category = categories.find(c => c.id === categoryId);
+      if (!category) return sendJson(res, 404, { error: 'Category not found' });
+      category.name = JSON.parse(body).name;
+      return sendJson(res, 200, { success: true, category });
+    }
+
+    // Admin: Delete category
+    if (path.match(/^\/api\/admin\/categories\/[^\/]+$/) && method === 'DELETE') {
+      if (!requireAuth(req, res)) return;
+      const categoryId = path.split('/')[4];
+      const index = categories.findIndex(c => c.id === categoryId);
+      if (index === -1) return sendJson(res, 404, { error: 'Category not found' });
+      categories.splice(index, 1);
+      return sendJson(res, 200, { success: true });
     }
 
     // 404
