@@ -176,8 +176,7 @@ export const api = {
       if (err?.error) throw new Error(err.error);
       // No JSON error body → the backend API is missing (static hosting, wrong port, proxy error).
       throw new Error(
-        `Login service unreachable (HTTP ${res.status}). The app is being served without its backend API. ` +
-          'Start it with "npm run dev" (or "npm run build && npm start") so /api is available — this is not a password problem.'
+        `Login service is currently unavailable (HTTP ${res.status}). The server may still be starting up — please wait a moment and try again. If the problem persists, restart the app with "npm run dev".`
       );
     }
     const data = await res.json();

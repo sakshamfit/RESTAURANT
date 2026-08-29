@@ -4,7 +4,7 @@
 import { initAdminAuth } from '../src/server/auth';
 import { store } from '../src/server/store';
 import { createApp } from '../src/server/app';
-import type { Request, Response } from 'express';
+import type { IncomingMessage, ServerResponse } from 'http';
 
 let app: ReturnType<typeof createApp> | null = null;
 let ready: Promise<void> | null = null;
@@ -21,7 +21,7 @@ async function ensureReady() {
   return app as ReturnType<typeof createApp>;
 }
 
-export default async function handler(req: Request, res: Response) {
+export default async function handler(req: IncomingMessage, res: ServerResponse) {
   const expressApp = await ensureReady();
-  return expressApp(req, res);
+  expressApp(req, res);
 }
