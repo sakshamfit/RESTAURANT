@@ -11,3 +11,6 @@ to Git (see `.gitignore`).
 
 If `DATABASE_URL` is set in `.env`, app data moves to your own PostgreSQL
 database instead (see `db/README.md`); admin credentials always stay local.
+On Vercel a writable override (`DATA_DIR=/tmp/restaurant-data`, automatic) is
+used. **Tip for Vercel:** set `ADMIN_PASSWORD` (and optionally `DATABASE_URL`)
+in Vercel → Settings → Environment Variables — see `DEPLOY.md`.

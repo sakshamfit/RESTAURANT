@@ -12,7 +12,9 @@ dotenv.config();
 // Admin → Café Settings → Update Password, which writes data/admin.json.
 const DEFAULT_ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@nagoritea.com';
 const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '9852120609@';
-const DATA_DIR = path.join(process.cwd(), 'data');
+const DATA_DIR =
+  process.env.DATA_DIR ||
+  (process.env.VERCEL ? '/tmp/restaurant-data' : path.join(process.cwd(), 'data'));
 const CREDENTIALS_FILE = path.join(DATA_DIR, 'admin.json');
 
 type AdminCredential = {
@@ -23,6 +25,7 @@ type AdminCredential = {
 };
 
 let cached: AdminCredential | null = null;
+let persistent = true;
 
 function hashPassword(password: string, salt: string): string {
   return crypto.scryptSync(password, salt, 64).toString('hex');
@@ -33,10 +36,16 @@ function randomSalt(): string {
 }
 
 async function writeCredentials(credential: AdminCredential): Promise<void> {
-  await fs.promises.mkdir(DATA_DIR, { recursive: true });
-  const tmpPath = `${CREDENTIALS_FILE}.tmp`;
-  await fs.promises.writeFile(tmpPath, JSON.stringify(credential, null, 2), 'utf8');
-  await fs.promises.rename(tmpPath, CREDENTIALS_FILE);
+  if (!persistent) return;
+  try {
+    await fs.promises.mkdir(DATA_DIR, { recursive: true });
+    const tmpPath = `${CREDENTIALS_FILE}.tmp`;
+    await fs.promises.writeFile(tmpPath, JSON.stringify(credential, null, 2), 'utf8');
+    await fs.promises.rename(tmpPath, CREDENTIALS_FILE);
+  } catch (error) {
+    persistent = false;
+    console.warn('[auth] Credential file not writable; keeping password in memory.', (error as Error)?.message || error);
+  }
 }
 
 /** Loads (or first-time creates) the credentials. Must be called once at startup. */
@@ -55,7 +64,7 @@ export async function initAdminAuth(): Promise<void> {
       updatedAt: new Date().toISOString(),
     };
     await writeCredentials(cached);
-    console.log('[auth] Created single admin account (data/admin.json).');
+    console.log(`[auth] Created single admin account (${CREDENTIALS_FILE}).`);
   }
 }
 

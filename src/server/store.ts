@@ -39,7 +39,12 @@ const TABLES: Record<StoreCollection, string> = {
 };
 
 // ── Local JSON file persistence (default, no cloud needed) ──────────────────
-const DATA_DIR = path.join(process.cwd(), 'data');
+// DATA_DIR can be overridden (Vercel sets it to /tmp/restaurant-data, which is
+// the only writable location on serverless instances). If the filesystem is
+// read-only the store falls back to in-memory so the app never crashes.
+const DATA_DIR =
+  process.env.DATA_DIR ||
+  (process.env.VERCEL ? '/tmp/restaurant-data' : path.join(process.cwd(), 'data'));
 const DATA_FILE = path.join(DATA_DIR, 'restaurant.json');
 
 type DataFile = {
@@ -154,6 +159,8 @@ export class RestaurantStore {
   private ready: Promise<void>;
   private usePostgres = postgresConfigured;
   private memory: DataFile;
+  /** True when the filesystem is not writable and we keep everything in memory. */
+  private ephemeral = false;
 
   constructor() {
     this.memory = this.loadOrCreateDataFileSync();
@@ -196,9 +203,14 @@ export class RestaurantStore {
       ...base,
       counters: { orders: 1040 },
     };
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    this.persistSync(file);
-    console.log('[store] Created local data file data/restaurant.json');
+    try {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      this.persistSync(file);
+      console.log(`[store] Created local data file ${DATA_FILE}`);
+    } catch {
+      this.ephemeral = true;
+      console.warn('[store] Filesystem not writable; running with in-memory data (changes lost on restart).');
+    }
     return file;
   }
 
@@ -208,10 +220,16 @@ export class RestaurantStore {
   }
 
   private async persist() {
-    await fs.promises.mkdir(DATA_DIR, { recursive: true });
-    const tmpPath = `${DATA_FILE}.tmp`;
-    await fs.promises.writeFile(tmpPath, JSON.stringify(this.memory, null, 2), 'utf8');
-    await fs.promises.rename(tmpPath, DATA_FILE);
+    if (this.ephemeral) return;
+    try {
+      await fs.promises.mkdir(DATA_DIR, { recursive: true });
+      const tmpPath = `${DATA_FILE}.tmp`;
+      await fs.promises.writeFile(tmpPath, JSON.stringify(this.memory, null, 2), 'utf8');
+      await fs.promises.rename(tmpPath, DATA_FILE);
+    } catch (error) {
+      this.ephemeral = true;
+      console.warn('[store] Filesystem not writable; switched to in-memory data.', (error as Error)?.message || error);
+    }
   }
 
   private async initialize() {
