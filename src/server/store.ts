@@ -54,6 +54,18 @@ type DataFile = {
   counters: { orders: number };
 };
 
+/**
+ * Errors that prove this filesystem can never hold our data. Anything else
+ * (ENOENT, EAGAIN, EBUSY, EMFILE, …) is transient and MUST be retried: treating
+ * those as fatal permanently switched the store to memory-only and silently
+ * dropped every later order/feedback.
+ */
+const FATAL_PERSIST_CODES = new Set(['EACCES', 'EPERM', 'EROFS', 'ENOSPC', 'EDQUOT', 'ENOTDIR']);
+
+function isFatalPersistError(error: any): boolean {
+  return FATAL_PERSIST_CODES.has(String(error?.code || ''));
+}
+
 // ── Direct Postgres persistence (optional, lazy-loaded) ─────────────────────
 // pg is imported dynamically only when DATABASE_URL is set, so the module
 // never fails to load on platforms like Vercel where pg may not be bundled.
@@ -164,6 +176,15 @@ export class RestaurantStore {
   private usePostgres = postgresConfigured;
   private memory: DataFile;
   private ephemeral = false;
+  /** Serializes disk writes: at most one write is in flight, the rest coalesce. */
+  private writeQueue: Promise<void> = Promise.resolve();
+  private inFlightWrite: Promise<void> | null = null;
+  private writeSequence = 0;
+  private persistFailures = 0;
+  private persistRetry: ReturnType<typeof setTimeout> | null = null;
+  /** Bumped on every in-memory change; compared against what is on disk. */
+  private memoryVersion = 0;
+  private persistedVersion = 0;
 
   constructor() {
     this.memory = this.loadOrCreateDataFileSync();
@@ -179,25 +200,46 @@ export class RestaurantStore {
   }
 
   private loadOrCreateDataFileSync(): DataFile {
+    let raw: string;
     try {
-      const raw = fs.readFileSync(DATA_FILE, 'utf8');
-      const parsed = JSON.parse(raw) as Partial<DataFile>;
-      const base = createMemorySnapshot();
-      const deriveCounter = () =>
-        Math.max(1040, ...(Array.isArray(parsed.orders) ? parsed.orders.map(orderNumberValue) : [0]));
-      return {
-        settings: { ...base.settings, ...(parsed.settings || {}) },
-        categories: Array.isArray(parsed.categories) ? parsed.categories : base.categories,
-        tables: Array.isArray(parsed.tables) ? parsed.tables : base.tables,
-        products: Array.isArray(parsed.products) ? parsed.products : base.products,
-        orders: Array.isArray(parsed.orders) ? parsed.orders : base.orders,
-        feedbacks: Array.isArray(parsed.feedbacks) ? parsed.feedbacks : base.feedbacks,
-        waiterCalls: Array.isArray(parsed.waiterCalls) ? parsed.waiterCalls : base.waiterCalls,
-        counters: { orders: Number(parsed.counters?.orders) || deriveCounter() },
-      };
+      raw = fs.readFileSync(DATA_FILE, 'utf8');
     } catch {
+      // No saved data yet (first start) — build the seeded snapshot.
       return this.createDataFile();
     }
+
+    let parsed: Partial<DataFile>;
+    try {
+      parsed = JSON.parse(raw) as Partial<DataFile>;
+    } catch (error) {
+      // Never throw a corrupt file away silently: the next write would overwrite
+      // it and the café would lose every saved order. Keep a copy to recover from.
+      const backupPath = `${DATA_FILE}.corrupt-${Date.now()}`;
+      try {
+        fs.writeFileSync(backupPath, raw, 'utf8');
+      } catch {
+        console.error(`[store] ${DATA_FILE} is not valid JSON and could not be backed up — starting from the seeded menu.`);
+        return this.createDataFile();
+      }
+      console.error(
+        `[store] ${DATA_FILE} is not valid JSON (${(error as Error)?.message || error}); started from the seeded menu. Your previous file was preserved at ${backupPath}.`
+      );
+      return this.createDataFile();
+    }
+
+    const base = createMemorySnapshot();
+    const deriveCounter = () =>
+      Math.max(1040, ...(Array.isArray(parsed.orders) ? parsed.orders.map(orderNumberValue) : [0]));
+    return {
+      settings: { ...base.settings, ...(parsed.settings || {}) },
+      categories: Array.isArray(parsed.categories) ? parsed.categories : base.categories,
+      tables: Array.isArray(parsed.tables) ? parsed.tables : base.tables,
+      products: Array.isArray(parsed.products) ? parsed.products : base.products,
+      orders: Array.isArray(parsed.orders) ? parsed.orders : base.orders,
+      feedbacks: Array.isArray(parsed.feedbacks) ? parsed.feedbacks : base.feedbacks,
+      waiterCalls: Array.isArray(parsed.waiterCalls) ? parsed.waiterCalls : base.waiterCalls,
+      counters: { orders: Number(parsed.counters?.orders) || deriveCounter() },
+    };
   }
 
   private createDataFile(): DataFile {
@@ -218,21 +260,109 @@ export class RestaurantStore {
   }
 
   private persistSync(data: DataFile) {
-    fs.writeFileSync(`${DATA_FILE}.tmp`, JSON.stringify(data, null, 2), 'utf8');
-    fs.renameSync(`${DATA_FILE}.tmp`, DATA_FILE);
+    const tmpPath = this.nextTmpPath();
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(tmpPath, DATA_FILE);
   }
 
-  private async persist() {
-    if (this.ephemeral) return;
+  /**
+   * A unique temp file per write. Sharing one `restaurant.json.tmp` path meant
+   * two concurrent requests raced on the same rename: the loser failed with
+   * ENOENT, which used to disable disk persistence for the whole process.
+   */
+  private nextTmpPath() {
+    this.writeSequence += 1;
+    return `${DATA_FILE}.${process.pid}.${this.writeSequence}.tmp`;
+  }
+
+  /**
+   * Serializes every disk write. Concurrent callers share a single flush of the
+   * latest state instead of each racing to rewrite the file, so the file always
+   * ends up holding the newest snapshot and is never left half-written.
+   */
+  private persist(): Promise<void> {
+    if (this.ephemeral) return Promise.resolve();
+    // Every call means "memory now holds something newer than the file". If a
+    // write is already in flight it captured the older state, so the version
+    // check below re-flushes once it settles.
+    this.memoryVersion += 1;
+    if (this.inFlightWrite) return this.inFlightWrite;
+
+    const flush = this.writeQueue.then(() => this.writeSnapshot());
+    // `flush` never rejects (writeSnapshot handles its own errors), so chaining
+    // the next write behind the settled one keeps the queue moving.
+    const settled = flush.then((wrote) => {
+      this.inFlightWrite = null;
+      // A mutation landed while that write was in flight: flush again, so the
+      // newest state is what ends up on disk and awaiting persist() really does
+      // mean "durable". Only after a *successful* write — a failed one is
+      // retried by schedulePersistRetry, never in a hot loop.
+      if (wrote && this.memoryVersion !== this.persistedVersion) void this.persist();
+    });
+    this.inFlightWrite = settled;
+    this.writeQueue = settled;
+    // Callers await this to know their change reached the disk.
+    return flush.then(() => undefined);
+  }
+
+  private async writeSnapshot(): Promise<boolean> {
+    if (this.ephemeral) return false;
+    const tmpPath = this.nextTmpPath();
+    // Captured before stringify: JSON.stringify is synchronous, so this is the
+    // exact version of the state that ends up in the file.
+    const version = this.memoryVersion;
     try {
       await fs.promises.mkdir(DATA_DIR, { recursive: true });
-      const tmpPath = `${DATA_FILE}.tmp`;
-      await fs.promises.writeFile(tmpPath, JSON.stringify(this.memory, null, 2), 'utf8');
+      const payload = JSON.stringify(this.memory, null, 2);
+      const handle = await fs.promises.open(tmpPath, 'w');
+      try {
+        await handle.writeFile(payload, 'utf8');
+        await handle.sync(); // durable before the rename makes it visible
+      } finally {
+        await handle.close();
+      }
       await fs.promises.rename(tmpPath, DATA_FILE);
+      this.persistedVersion = version;
+      this.persistFailures = 0;
+      return true;
     } catch (error) {
-      this.ephemeral = true;
-      console.warn('[store] Filesystem not writable; switched to in-memory data.', (error as Error)?.message || error);
+      await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
+      this.handlePersistFailure(error);
+      return false;
     }
+  }
+
+  private handlePersistFailure(error: unknown) {
+    const message = (error as Error)?.message || String(error);
+    this.persistFailures += 1;
+
+    if (isFatalPersistError(error)) {
+      this.ephemeral = true;
+      console.error(
+        `[store] Cannot write ${DATA_FILE} (${message}). Running in memory only — changes are lost on restart. Set DATABASE_URL for durable storage.`
+      );
+      return;
+    }
+
+    // Transient failure: keep the data in memory and retry on the next write.
+    this.schedulePersistRetry();
+    if (this.persistFailures === 1 || this.persistFailures % 25 === 0) {
+      console.warn(`[store] Write to ${DATA_FILE} failed (${message}); retrying on the next change.`);
+    }
+  }
+
+  /**
+   * Retry a failed write even when no further mutation arrives, so the last
+   * change is never stranded in memory only. Backs off to at most 30s.
+   */
+  private schedulePersistRetry() {
+    if (this.persistRetry) return;
+    const delay = Math.min(30_000, 500 * 2 ** Math.min(this.persistFailures, 6));
+    this.persistRetry = setTimeout(() => {
+      this.persistRetry = null;
+      void this.persist();
+    }, delay);
+    this.persistRetry.unref?.();
   }
 
   private async initialize() {

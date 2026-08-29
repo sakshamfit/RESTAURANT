@@ -26,12 +26,20 @@ Vercel → Project → **Settings → Environment Variables**:
 Every deploy/cold start will use that as the admin password — stable and safe.
 Set `ADMIN_EMAIL` too if you want a different admin email label.
 
+The Vercel API (`api/index.ts`) runs the same Express app as the local server,
+so `ADMIN_PASSWORD` really is the source of truth there. Note that a password
+changed from Admin → Café Settings is written to `/tmp` and therefore reverts to
+`ADMIN_PASSWORD` on the next cold start — treat the env var as the permanent
+password and the settings screen as a temporary override.
+
 ## Options
 
 ### A) No database (simplest)
-Works out of the box. Data lives in `/tmp/restaurant-data` on the running
-instance and **resets when Vercel redeploys**. Fine for demo/preview, not for
-real customers' order history.
+Works out of the box. Data lives in `/tmp/restaurant-data` **on each running
+instance**, so it survives warm invocations of that instance but is not shared
+between instances and resets on every cold start or redeploy. Fine for a
+demo/preview, not for real customers' order history — two guests can be served
+by different instances and see different data. Use option B for real use.
 
 ### B) Free Postgres (recommended for real use) — keeps all data forever
 1. Create a free Postgres database (e.g. **Neon** at neon.tech, or any
