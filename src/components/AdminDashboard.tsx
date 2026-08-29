@@ -18,7 +18,7 @@ import {
   UserCheck,
 } from 'lucide-react';
 import { Order, Product, CafeTable, CafeCategory, CafeSettings, WaiterCall } from '../types';
-import { api } from '../services/api';
+import { api, BackendHealth } from '../services/api';
 import { AdminOrders } from './AdminOrders';
 import { AdminProducts } from './AdminProducts';
 import { AdminTables } from './AdminTables';
@@ -48,6 +48,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [tables, setTables] = useState<(CafeTable & { activeOrder?: Order | null })[]>([]);
   const [categories, setCategories] = useState<CafeCategory[]>([]);
   const [settings, setSettings] = useState<CafeSettings | null>(null);
+  const [backendHealth, setBackendHealth] = useState<BackendHealth | null>(null);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
   const [isSirenActive, setIsSirenActive] = useState<boolean>(false);
   const [sirenMessage, setSirenMessage] = useState<string>('🚨 LIVE LOUD SIREN: NEW ORDER RECEIVED! KITCHEN ALERT!');
@@ -95,6 +96,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         api.adminGetCategories(),
         api.adminGetSettings(),
       ]);
+
+      // Backend storage health is informative only — never block the dashboard on it.
+      api
+        .getHealth()
+        .then((health) => setBackendHealth(health))
+        .catch(() => setBackendHealth(null));
 
       const newOrders = ordersRes.orders;
       const newCalls = waiterCallsRes.calls || [];
@@ -296,6 +303,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           })}
         </div>
       </header>
+
+      {/* Backend Storage Health Banner (informative — shows where data is saved) */}
+      {backendHealth && backendHealth.persistence !== 'postgres' && (
+        <div
+          className={`px-4 py-2.5 text-xs font-semibold border-b flex flex-wrap items-center gap-2 ${
+            backendHealth.postgresConfigured
+              ? 'bg-red-50 text-red-800 border-red-200'
+              : 'bg-amber-50 text-amber-800 border-amber-200'
+          }`}
+        >
+          <span className="w-2 h-2 rounded-full bg-current animate-pulse shrink-0" />
+          {backendHealth.postgresConfigured ? (
+            <>
+              <span>
+                ⚠ Database is configured but NOT reachable — orders &amp; changes are saved to temporary storage and may
+                disappear. Check <code className="font-mono">DATABASE_URL</code> in Vercel.
+              </span>
+              {backendHealth.postgres?.error?.message && (
+                <span className="text-[11px] font-mono text-red-600 truncate max-w-full">
+                  ({backendHealth.postgres.error.message})
+                </span>
+              )}
+            </>
+          ) : (
+            <span>
+              💡 Tip: connect a free PostgreSQL database (<code className="font-mono">DATABASE_URL</code>) in Vercel so
+              orders, menu and reports persist permanently. Without it, data resets on redeploys.
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6">

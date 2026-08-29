@@ -117,7 +117,18 @@ export default function App() {
       setActiveTableToken(data.table.token);
       localStorage.setItem('nagori_scanned_table_token', data.table.token);
     } catch (err: any) {
-      setMenuError(err?.message || 'Failed to load menu for this table.');
+      const message = err?.message || 'Failed to load menu for this table.';
+      setMenuError(message);
+      // A hard table rejection (invalid QR token / inactive table) must not
+      // leave the previous table's menu on screen. Network hiccups keep the
+      // current menu so a flaky connection doesn't blank the page.
+      if (/not found|invalid|not in service/i.test(message)) {
+        setTable(null);
+        setSettings(null);
+        setCategories([]);
+        setProducts([]);
+        setCartItems([]);
+      }
     } finally {
       setLoadingMenu(false);
     }
