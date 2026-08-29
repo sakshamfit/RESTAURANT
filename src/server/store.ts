@@ -16,6 +16,30 @@ import type { CafeCategory, CafeSettings, CafeTable, CustomerFeedback, Order, Pr
 export type StoreCollection = 'categories' | 'tables' | 'products' | 'orders' | 'feedbacks' | 'waiterCalls';
 export type StoreProvider = 'postgres' | 'file';
 
+/** Which step of the Postgres bootstrap failed (surfaced via /api/health). */
+export type PostgresPhase =
+  | 'ssl-probe'
+  | 'connect'
+  | 'schema-check'
+  | 'schema-apply'
+  | 'seed'
+  | 'counter'
+  | 'unknown';
+
+/** Non-secret diagnostics about the store, exposed by the health endpoint. */
+export interface StoreDiagnostics {
+  provider: StoreProvider;
+  postgresConfigured: boolean;
+  /** Hostname only — never credentials. */
+  postgresHost: string;
+  postgresStatus: 'connected' | 'unavailable' | 'not-configured';
+  postgresError: { message: string; code?: string; phase: PostgresPhase; at: string } | null;
+  postgresRecoveryAttempts: number;
+  postgresLastProbeAt: string | null;
+  dataFile: string;
+  ephemeral: boolean;
+}
+
 type CollectionModel = {
   categories: CafeCategory;
   tables: CafeTable;
@@ -110,6 +134,27 @@ async function resolvePgSsl(): Promise<'tls' | 'none'> {
   return pgSslResolved;
 }
 
+/**
+ * Derive the non-pooled equivalent of a Neon-style pooled connection string
+ * (host `ep-…-pooler.….neon.tech` → `ep-….….neon.tech`), dropping pooler-only
+ * parameters. Returns null when nothing suggests a pooler, or when the URL
+ * cannot be parsed.
+ */
+function deriveDirectPgUrl(pooledUrl: string): string | null {
+  try {
+    const url = new URL(pooledUrl);
+    if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') return null;
+    const looksPooled = url.hostname.includes('-pooler') || url.searchParams.has('pgbouncer');
+    if (!looksPooled) return null;
+    url.hostname = url.hostname.replace('-pooler', '');
+    url.searchParams.delete('pgbouncer');
+    url.searchParams.delete('connection_limit');
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function ipv4SocketFactory() {
   return () => {
     const socket = new net.Socket();
@@ -189,6 +234,12 @@ export class RestaurantStore {
   /** Bumped on every in-memory change; compared against what is on disk. */
   private memoryVersion = 0;
   private persistedVersion = 0;
+  /** Postgres bootstrap diagnostics + background recovery state. */
+  private pgPhase: PostgresPhase = 'unknown';
+  private pgError: StoreDiagnostics['postgresError'] = null;
+  private pgRecoveryAttempts = 0;
+  private pgRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private pgLastProbeAt: string | null = null;
 
   constructor() {
     this.memory = this.loadOrCreateDataFileSync();
@@ -371,26 +422,110 @@ export class RestaurantStore {
 
   private async initialize() {
     if (this.usePostgres) {
-      try {
-        await this.ensurePostgresSchema();
-        const settings = await this.getSettingsInternal();
-        if (!settings) await this.putSettingsInternal(initialSettings);
-        await this.seedMissing('categories', initialCategories);
-        await this.seedMissing('tables', initialTables);
-        await this.seedMissing('products', initialProducts);
-        await this.ensureCounter();
-        console.log('[store] Persistence: direct Postgres (DATABASE_URL).');
-        return;
-      } catch (error) {
-        this.usePostgres = false;
-        console.warn('[store] Postgres configured but unreachable; using the local data file instead.', (error as Error)?.message || error);
-      }
+      if (await this.initPostgresOnce()) return;
     }
     console.log('[store] Persistence: local file data/restaurant.json (no cloud services).');
+    // DATABASE_URL is configured but the database was not reachable on first
+    // try (sleeping serverless DB, transient DNS/SSL hiccup, bad URL, …).
+    // Retry in the background so the store upgrades itself to real, shared,
+    // durable data the moment the database comes back — instead of silently
+    // staying on per-instance /tmp files forever.
+    if (postgresConfigured) this.schedulePostgresRecovery();
+  }
+
+  /**
+   * One full Postgres bootstrap attempt: SSL probe → schema check/apply →
+   * seed → counter. Every failure is recorded with the phase it happened in,
+   * so /api/health can report exactly why the database is not in use.
+   */
+  private async initPostgresOnce(): Promise<boolean> {
+    this.pgLastProbeAt = new Date().toISOString();
+    this.pgRecoveryAttempts += 1;
+    try {
+      this.pgPhase = 'ssl-probe';
+      await this.ensurePostgresSchema();
+      this.pgPhase = 'seed';
+      const settings = await this.getSettingsInternal();
+      if (!settings) await this.putSettingsInternal(initialSettings);
+      await this.seedMissing('categories', initialCategories);
+      await this.seedMissing('tables', initialTables);
+      await this.seedMissing('products', initialProducts);
+      this.pgPhase = 'counter';
+      await this.ensureCounter();
+      // If the store already issued order numbers from the local file, make
+      // sure the database counter never hands out a duplicate.
+      await this.raisePgCounterToLocalMax();
+      this.usePostgres = true;
+      this.pgError = null;
+      console.log('[store] Persistence: direct Postgres (DATABASE_URL).');
+      return true;
+    } catch (error) {
+      this.usePostgres = false;
+      this.pgError = {
+        message: (error as Error)?.message || String(error),
+        code: (error as { code?: string })?.code,
+        phase: this.pgPhase,
+        at: new Date().toISOString(),
+      };
+      console.warn(
+        `[store] Postgres configured but unreachable during '${this.pgPhase}'; using the local data file instead.`,
+        this.pgError.message
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Retry the Postgres bootstrap in the background with capped exponential
+   * backoff (30s → 60s → 120s → 240s → 300s max). Each attempt is cheap
+   * (one connection); this is what heals "fluctuating data" after a cold
+   * start beat the database wake-up, without ever blocking requests.
+   */
+  private schedulePostgresRecovery() {
+    if (!postgresConfigured || this.pgRecoveryTimer || this.usePostgres) return;
+    const delay = Math.min(300_000, 30_000 * 2 ** Math.min(this.pgRecoveryAttempts - 1, 3));
+    this.pgRecoveryTimer = setTimeout(() => {
+      this.pgRecoveryTimer = null;
+      void this.initPostgresOnce().then((ok) => {
+        if (!ok) this.schedulePostgresRecovery();
+      });
+    }, delay);
+    this.pgRecoveryTimer.unref?.();
+  }
+
+  /**
+   * Non-secret store diagnostics for the /api/health endpoint. The Postgres
+   * host is reported as a hostname only; connection strings and passwords
+   * are never included.
+   */
+  getDiagnostics(): StoreDiagnostics {
+    let postgresHost = '';
+    try {
+      postgresHost = new URL(pgUrl).hostname;
+    } catch {
+      // unparseable URL — leave host empty
+    }
+    return {
+      provider: this.provider,
+      postgresConfigured,
+      postgresHost,
+      postgresStatus: !postgresConfigured
+        ? 'not-configured'
+        : this.usePostgres
+          ? 'connected'
+          : 'unavailable',
+      postgresError: this.pgError,
+      postgresRecoveryAttempts: this.pgRecoveryAttempts,
+      postgresLastProbeAt: this.pgLastProbeAt,
+      dataFile: DATA_FILE,
+      ephemeral: this.ephemeral,
+    };
   }
 
   private async ensurePostgresSchema() {
+    this.pgPhase = 'connect';
     const pool = await getPool();
+    this.pgPhase = 'schema-check';
     const { rows } = await pool.query(
       `select to_regclass('public.app_settings') as settings, to_regclass('public.app_counters') as counters`
     );
@@ -400,14 +535,23 @@ export class RestaurantStore {
     const sql = await readFile(schemaPath, 'utf8');
     await resolvePgSsl();
     const { Client } = await loadPg();
+    // DDL must run on a direct (non-pooled) connection: pgbouncer/Neon pooler
+    // endpoints reject multi-statement transactions and `create extension`.
+    // Prefer DIRECT_URL, and derive the direct host from Neon-style
+    // `…-pooler.…` URLs when only the pooled one is configured.
+    const migrationUrl = pgDirectUrl || deriveDirectPgUrl(pgUrl) || pgUrl;
+    if (migrationUrl !== pgDirectUrl && !process.env.DIRECT_URL) {
+      console.log('[store] Using a derived direct URL for the schema migration (pooled DATABASE_URL detected).');
+    }
     const clientOptions: PgOptions = {
-      connectionString: pgDirectUrl,
+      connectionString: migrationUrl,
       family: PG_FAMILY,
       stream: ipv4SocketFactory(),
       connectionTimeoutMillis: 20000,
     };
     if (pgSslResolved === 'tls') clientOptions.ssl = { rejectUnauthorized: false };
     const client = new Client(clientOptions);
+    this.pgPhase = 'schema-apply';
     await client.connect();
     try {
       await client.query(sql);
@@ -420,6 +564,24 @@ export class RestaurantStore {
       throw new Error('Database schema is still missing after running db/schema.sql.');
     }
     console.log('[store] Postgres schema was not present; applied db/schema.sql automatically.');
+  }
+
+  /**
+   * Bring the database order counter up to at least the highest number the
+   * local file store has already handed out, so switching to Postgres never
+   * issues a duplicate order number.
+   */
+  private async raisePgCounterToLocalMax() {
+    try {
+      const localMax = this.memory.counters.orders || 0;
+      await (await getPool()).query(
+        `update app_counters set value = greatest(value, $1) where id = 'orders'`,
+        [localMax]
+      );
+    } catch (error) {
+      // Non-fatal: the counter is only a monotonicity guard.
+      console.warn('[store] Could not sync the Postgres order counter:', (error as Error)?.message || error);
+    }
   }
 
   private async seedMissing<C extends StoreCollection>(collection: C, records: CollectionModel[C][]) {

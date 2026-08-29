@@ -225,12 +225,27 @@ export function createApp() {
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
   app.get('/api/health', (_req, res) => {
+    const diagnostics = store.getDiagnostics();
+    res.set('Cache-Control', 'no-store');
     res.json({
       status: 'ok',
       app: 'Nagori Chai Point API',
-      persistence: store.provider,
-      postgresConfigured,
-      storage: store.provider === 'postgres' ? 'database' : 'local-json-file',
+      // Commit that produced this deploy, when running on Vercel.
+      deploySha: process.env.VERCEL_GIT_COMMIT_SHA || null,
+      persistence: diagnostics.provider,
+      postgresConfigured: diagnostics.postgresConfigured,
+      storage: diagnostics.provider === 'postgres' ? 'database' : 'local-json-file',
+      postgres: diagnostics.postgresConfigured
+        ? {
+            host: diagnostics.postgresHost,
+            status: diagnostics.postgresStatus,
+            error: diagnostics.postgresError,
+            recoveryAttempts: diagnostics.postgresRecoveryAttempts,
+            lastProbeAt: diagnostics.postgresLastProbeAt,
+          }
+        : undefined,
+      dataFile: diagnostics.dataFile,
+      ephemeral: diagnostics.ephemeral,
       timestamp: new Date().toISOString(),
     });
   });

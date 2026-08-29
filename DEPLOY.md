@@ -70,6 +70,23 @@ the "Update Password" screen in Admin → Café Settings instead.
 - Customer view: click any table / scan QR at
   `https://nagori-restaurent.vercel.app/order/nagori_tbl_tok_table1_9a2f7c`.
 
+## Checking backend health
+
+`https://nagori-restaurent.vercel.app/api/health` reports exactly where data is
+stored and why:
+
+- `"persistence": "postgres"` → real database in use, data is durable. ✅
+- `"persistence": "file"` + `"postgresConfigured": true` → the database URL is
+  set but unreachable. The `postgres.error` field shows the exact failure
+  (message, code, phase) and the backend keeps retrying in the background
+  (30s → 5min backoff), so it heals itself the moment the database comes back.
+- `"persistence": "file"` + `"postgresConfigured": false` → no database
+  configured: data is per-instance temporary storage and resets on cold starts
+  (see Options A/B above).
+
+The Admin dashboard also shows a warning banner whenever data is not going to
+the real database.
+
 ## Local development
 
 ```bash

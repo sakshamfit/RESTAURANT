@@ -16,7 +16,36 @@ function getAuthHeader() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/** Shape of the backend /api/health payload. */
+export interface BackendHealth {
+  status: string;
+  app: string;
+  deploySha?: string | null;
+  persistence: 'postgres' | 'file';
+  postgresConfigured: boolean;
+  storage: 'database' | 'local-json-file';
+  postgres?: {
+    host: string;
+    status: 'connected' | 'unavailable' | 'not-configured';
+    error: { message: string; code?: string; phase: string; at: string } | null;
+    recoveryAttempts: number;
+    lastProbeAt: string | null;
+  };
+  dataFile?: string;
+  ephemeral?: boolean;
+  timestamp: string;
+}
+
 export const api = {
+  // Backend health & diagnostics
+  async getHealth(): Promise<BackendHealth> {
+    const res = await fetch(`${API_BASE}/health`, { cache: 'no-store' });
+    if (!res.ok) {
+      throw new Error('Backend health check failed.');
+    }
+    return res.json();
+  },
+
   // Public Customer APIs
   async getPublicTables(): Promise<{ tables: CafeTable[] }> {
     const res = await fetch(`${API_BASE}/public/tables`);
