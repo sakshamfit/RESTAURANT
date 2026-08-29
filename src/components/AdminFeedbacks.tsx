@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Star, MessageSquare, RefreshCw, Sparkles, User, MapPin, Award, ThumbsUp } from 'lucide-react';
 import { CustomerFeedback } from '../types';
 import { api } from '../services/api';
-import { subscribeToFeedbacks } from '../lib/firebase';
+import { subscribeToFeedbacks } from '../lib/supabase';
 
 export const AdminFeedbacks: React.FC = () => {
   const [feedbacks, setFeedbacks] = useState<CustomerFeedback[]>([]);

@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { Order, Product, CafeTable, CafeCategory, CafeSettings, WaiterCall } from '../types';
 import { api } from '../services/api';
-import { subscribeToOrders, subscribeToWaiterCalls } from '../lib/firebase';
+import { subscribeToOrders, subscribeToWaiterCalls } from '../lib/supabase';
 import { AdminOrders } from './AdminOrders';
 import { AdminProducts } from './AdminProducts';
 import { AdminTables } from './AdminTables';
@@ -131,7 +131,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => {
     fetchAllData(true);
 
-    // Realtime listeners from Firestore for instant zero-lag kitchen alerts
+    // Realtime listeners from Supabase for instant zero-lag kitchen alerts
     const unsubOrders = subscribeToOrders((liveOrders) => {
       if (liveOrders && liveOrders.length > 0) {
         setOrders(liveOrders);
