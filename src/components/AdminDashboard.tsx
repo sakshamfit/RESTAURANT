@@ -19,7 +19,6 @@ import {
 } from 'lucide-react';
 import { Order, Product, CafeTable, CafeCategory, CafeSettings, WaiterCall } from '../types';
 import { api } from '../services/api';
-import { subscribeToOrders, subscribeToWaiterCalls } from '../lib/supabase';
 import { AdminOrders } from './AdminOrders';
 import { AdminProducts } from './AdminProducts';
 import { AdminTables } from './AdminTables';
@@ -131,39 +130,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => {
     fetchAllData(true);
 
-    // Realtime listeners from Supabase for instant zero-lag kitchen alerts
-    const unsubOrders = subscribeToOrders((liveOrders) => {
-      if (liveOrders && liveOrders.length > 0) {
-        setOrders(liveOrders);
-        const newOrdersCount = liveOrders.filter((o) => o.status === 'new').length;
-        if (liveOrders.length > prevOrdersCountRef.current && newOrdersCount > 0) {
-          triggerSirenAlert('🚨 LIVE LOUD SIREN: NEW ORDER RECEIVED! KITCHEN ALERT!');
-        }
-        prevOrdersCountRef.current = liveOrders.length;
-      }
-    });
-
-    const unsubWaiter = subscribeToWaiterCalls((liveCalls) => {
-      if (liveCalls) {
-        setWaiterCalls(liveCalls);
-        const pendingCalls = liveCalls.filter((c) => c.status === 'pending');
-        if (pendingCalls.length > prevWaiterCallsCountRef.current) {
-          const latestPending = pendingCalls[0];
-          triggerSirenAlert(`🔔 WAITER CALLED AT TABLE ${latestPending?.tableNumber || ''}! ASSISTANCE REQUESTED!`);
-        }
-        prevWaiterCallsCountRef.current = pendingCalls.length;
-      }
-    });
-
-    // Synchronize every 5 seconds as fallback
+    // Synchronize every 5 seconds (local polling — no cloud realtime needed)
     const interval = setInterval(() => {
       fetchAllData(false);
     }, 5000);
 
     return () => {
       clearInterval(interval);
-      if (typeof unsubOrders === 'function') unsubOrders();
-      if (typeof unsubWaiter === 'function') unsubWaiter();
       stopSiren();
     };
   }, [soundEnabled]);

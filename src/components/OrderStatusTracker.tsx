@@ -2,7 +2,6 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Clock, ChefHat, CheckCircle2, AlertCircle, ArrowLeft, RefreshCw, Sparkles, Receipt, Bell } from 'lucide-react';
 import { Order, OrderStatus, CafeSettings } from '../types';
 import { api } from '../services/api';
-import { subscribeToOrder } from '../lib/supabase';
 import { playOrderAcceptedSound, playOrderReadySound, playCustomerOrderSuccessSound, sendBrowserNotification, unlockAudio } from '../utils/audioAlerts';
 import { CustomerFeedbackCard } from './CustomerFeedbackCard';
 
@@ -46,26 +45,13 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
   useEffect(() => {
     fetchOrder();
 
-    // Realtime listener from Supabase
-    const unsubscribeSupabase = subscribeToOrder(orderId, (liveOrder) => {
-      if (liveOrder) {
-        setOrder(liveOrder);
-        setLoading(false);
-        setError(null);
-        setLastRefreshed(new Date());
-      }
-    });
-
-    // Fallback sync interval
+    // Local polling — no cloud realtime needed
     const timer = setInterval(() => {
       fetchOrder(false);
     }, 4000);
 
     return () => {
       clearInterval(timer);
-      if (typeof unsubscribeSupabase === 'function') {
-        unsubscribeSupabase();
-      }
     };
   }, [orderId]);
 

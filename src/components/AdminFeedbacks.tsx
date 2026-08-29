@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { Star, MessageSquare, RefreshCw, Sparkles, User, MapPin, Award, ThumbsUp } from 'lucide-react';
 import { CustomerFeedback } from '../types';
 import { api } from '../services/api';
-import { subscribeToFeedbacks } from '../lib/supabase';
 
 export const AdminFeedbacks: React.FC = () => {
   const [feedbacks, setFeedbacks] = useState<CustomerFeedback[]>([]);
@@ -48,21 +47,12 @@ export const AdminFeedbacks: React.FC = () => {
   useEffect(() => {
     fetchFeedbacks(true);
 
-    const unsub = subscribeToFeedbacks((liveList) => {
-      if (liveList && liveList.length > 0) {
-        setFeedbacks(liveList);
-        calculateStats(liveList);
-        setLoading(false);
-      }
-    });
-
     const interval = setInterval(() => {
       fetchFeedbacks(false);
     }, 6000);
 
     return () => {
       clearInterval(interval);
-      if (typeof unsub === 'function') unsub();
     };
   }, []);
 
