@@ -21,6 +21,7 @@ import {
   supabaseAdmin,
   supabaseAuth,
   supabaseConfigured,
+  postgresConfigured,
   newId,
 } from './src/server/store';
 import { initialSettings } from './src/server/seed';
@@ -33,6 +34,15 @@ const fallbackAdminEmail = process.env.ADMIN_EMAIL || 'admin@nagoritea.com';
 const fallbackAdminPassword = process.env.ADMIN_PASSWORD || '9852120609';
 const fallbackAdminTokens = new Set<string>();
 const clientOrderTimestamps = new Map<string, number>();
+
+function pgUrlSafe() {
+  // Hostname only — never log credentials.
+  try {
+    return new URL(process.env.DATABASE_URL || '');
+  } catch {
+    return new URL('postgresql://unconfigured');
+  }
+}
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -78,11 +88,12 @@ function getBearerToken(req: Request) {
   return header?.startsWith('Bearer ') ? header.slice(7).trim() : '';
 }
 
-// Supabase Auth owns admin sessions when configured. The fallback is deliberately
-// memory-only and is used solely to keep an unconfigured local preview usable.
+// Supabase Auth owns admin sessions when the Supabase provider is active. When the
+// app persists via direct Postgres (or a bare local preview) a short-lived local
+// session token issued by /api/admin/login is used instead.
 async function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   const token = getBearerToken(req);
-  if (!token) return jsonError(res, 401, 'Unauthorized: Missing Supabase session.');
+  if (!token) return jsonError(res, 401, 'Unauthorized: Missing admin session.');
 
   if (supabaseAdmin && store.provider === 'supabase') {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
@@ -140,9 +151,9 @@ app.get('/api/health', (_req, res) => {
     status: 'ok',
     app: 'Nagori Chai Point API',
     persistence: store.provider,
-    supabaseConfigured: store.provider === 'supabase',
     supabaseCredentialsConfigured: supabaseConfigured,
-    storage: store.provider === 'supabase' ? 'supabase-storage' : 'memory-preview',
+    postgresConfigured,
+    storage: store.provider === 'supabase' ? 'supabase-storage' : store.provider === 'postgres' ? 'inline-data-url' : 'memory-preview',
     timestamp: new Date().toISOString(),
   });
 });
@@ -164,7 +175,7 @@ app.get('/api/public/tables', async (_req, res) => {
     res.json({ tables });
   } catch (error) {
     console.error('Public tables error:', error);
-    jsonError(res, 500, 'Unable to load tables from Supabase.');
+    jsonError(res, 500, 'Unable to load tables from the café database.');
   }
 });
 
@@ -183,7 +194,7 @@ app.get('/api/table/:token', async (req, res) => {
     });
   } catch (error) {
     console.error('Table menu error:', error);
-    jsonError(res, 500, 'Unable to load the menu from Supabase.');
+    jsonError(res, 500, 'Unable to load the menu from the café database.');
   }
 });
 
@@ -198,7 +209,7 @@ app.get('/api/table/:token/orders', async (req, res) => {
     res.json({ table: { id: table.id, tableNumber: table.tableNumber, name: table.name, token: table.token }, orders });
   } catch (error) {
     console.error('Table orders error:', error);
-    jsonError(res, 500, 'Unable to load order history from Supabase.');
+    jsonError(res, 500, 'Unable to load order history from the café database.');
   }
 });
 
@@ -281,7 +292,7 @@ app.get('/api/orders/track/:orderId', async (req, res) => {
     res.json({ order });
   } catch (error) {
     console.error('Track order error:', error);
-    jsonError(res, 500, 'Unable to track order from Supabase.');
+    jsonError(res, 500, 'Unable to track the order from the café database.');
   }
 });
 
@@ -358,7 +369,7 @@ app.post('/api/admin/login', async (req, res) => {
   }
 
   const acceptedNames = new Set(['nagori tea point', 'nagoriteapoint', 'nagori chai point', 'nagori', 'admin', fallbackAdminEmail.toLowerCase()]);
-  if (!acceptedNames.has((inputEmail || 'admin').toLowerCase()) || password !== fallbackAdminPassword) return jsonError(res, 401, 'Invalid local preview credentials.');
+  if (!acceptedNames.has((inputEmail || 'admin').toLowerCase()) || password !== fallbackAdminPassword) return jsonError(res, 401, 'Invalid admin credentials.');
   const token = `preview_${crypto.randomBytes(24).toString('hex')}`;
   fallbackAdminTokens.add(token);
   res.json({ success: true, token, admin: { email: fallbackAdminEmail } });
@@ -385,7 +396,7 @@ app.get('/api/admin/orders', requireAdminAuth, async (req, res) => {
     res.json({ orders });
   } catch (error) {
     console.error('Admin orders error:', error);
-    jsonError(res, 500, 'Failed to fetch orders from Supabase.');
+    jsonError(res, 500, 'Failed to fetch orders from the café database.');
   }
 });
 
@@ -687,8 +698,16 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Nagori Chai Point server running on http://0.0.0.0:${PORT} (${store.provider})`);
-    if (!supabaseConfigured) console.warn('Supabase is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY; this preview is memory-only.');
+    console.log(`Nagori Chai Point server running on http://0.0.0.0:${PORT} (persistence: ${store.provider})`);
+    if (store.provider === 'supabase') {
+      console.log('Persistence: Supabase (PostgREST + Realtime + Storage).');
+    } else if (store.provider === 'postgres') {
+      console.log(`Persistence: direct Postgres via DATABASE_URL (${new URL(pgUrlSafe()).host}).`);
+    } else if (supabaseConfigured || postgresConfigured) {
+      console.warn('Persistence is configured but unreachable in this environment; running with memory-only preview data.');
+    } else {
+      console.warn('No persistence configured (add Supabase keys or DATABASE_URL); this preview is memory-only.');
+    }
   });
 }
 
