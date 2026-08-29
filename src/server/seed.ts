@@ -1,4 +1,4 @@
-import {
+import type {
   CafeCategory,
   CafeSettings,
   CafeTable,
@@ -6,7 +6,7 @@ import {
   Order,
   Product,
   WaiterCall,
-} from '../types';
+} from '../types.js';
 
 const createdAt = '2026-01-01T00:00:00.000Z';
 
