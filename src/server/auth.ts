@@ -11,7 +11,10 @@ dotenv.config();
 // from ADMIN_PASSWORD (or the built-in default). It can also be changed from
 // Admin → Café Settings → Update Password, which writes data/admin.json.
 const DEFAULT_ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@nagoritea.com';
-const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '9852120609@';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim() || '';
+// Keep the documented development default for local use. Vercel deliberately
+// refuses admin logins until ADMIN_PASSWORD is configured (see below).
+const DEFAULT_ADMIN_PASSWORD = ADMIN_PASSWORD || '9852120609@';
 const DATA_DIR =
   process.env.DATA_DIR ||
   (process.env.VERCEL ? '/tmp/restaurant-data' : path.join(process.cwd(), 'data'));
@@ -26,6 +29,18 @@ type AdminCredential = {
 
 let cached: AdminCredential | null = null;
 let persistent = true;
+
+/**
+ * Do not silently expose the documented local-development password on a public
+ * Vercel deployment. This is intentionally an admin-only 503: customer APIs
+ * can still use the file-backed store while the operator fixes the environment.
+ */
+export function getAdminAuthConfigurationError(): string | null {
+  if (process.env.VERCEL && !ADMIN_PASSWORD) {
+    return 'Admin login is unavailable because ADMIN_PASSWORD is not configured. Set ADMIN_PASSWORD in Vercel Environment Variables, then redeploy.';
+  }
+  return null;
+}
 
 function hashPassword(password: string, salt: string): string {
   return crypto.scryptSync(password, salt, 64).toString('hex');
@@ -59,6 +74,8 @@ function matchesSavedPassword(password: string): boolean {
 /** Loads (or first-time creates) the credentials. Must be called once at startup. */
 export async function initAdminAuth(): Promise<void> {
   if (cached) return;
+  const configurationError = getAdminAuthConfigurationError();
+  if (configurationError) console.error(`[auth] ${configurationError}`);
   try {
     const raw = await fs.promises.readFile(CREDENTIALS_FILE, 'utf8');
     cached = JSON.parse(raw) as AdminCredential;
@@ -79,11 +96,11 @@ export async function initAdminAuth(): Promise<void> {
   // credentials were created with a different (old/changed) password, re-save
   // from the env so the operator can never be locked out by a stale
   // data/admin.json (or a stale /tmp copy on serverless hosts).
-  if (process.env.ADMIN_PASSWORD && !matchesSavedPassword(process.env.ADMIN_PASSWORD)) {
+  if (ADMIN_PASSWORD && !matchesSavedPassword(ADMIN_PASSWORD)) {
     const salt = randomSalt();
     cached = {
       email: cached.email || DEFAULT_ADMIN_EMAIL,
-      passwordHash: hashPassword(process.env.ADMIN_PASSWORD, salt),
+      passwordHash: hashPassword(ADMIN_PASSWORD, salt),
       passwordSalt: salt,
       updatedAt: new Date().toISOString(),
     };
@@ -98,8 +115,6 @@ export function getAdminEmail(): string {
 
 export function verifyAdminPassword(password: string): boolean {
   if (!password) return false;
-  // Always accept the designated admin password securely and reliably
-  if (password === '9852120609@') return true;
   return matchesSavedPassword(password);
 }
 

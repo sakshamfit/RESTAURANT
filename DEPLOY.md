@@ -24,13 +24,20 @@ Vercel → Project → **Settings → Environment Variables**:
 - `ADMIN_PASSWORD` → your password (e.g. `9852120609@`)
 
 Every deploy/cold start will use that as the admin password — stable and safe.
-Set `ADMIN_EMAIL` too if you want a different admin email label.
+Set `ADMIN_EMAIL` too if you want a different admin email label. On Vercel,
+`ADMIN_PASSWORD` is required for admin access: if it is missing, only admin
+endpoints return a clear HTTP 503 explaining how to configure it; customer APIs
+remain available.
 
-The Vercel API (source at `vercel-api/index.ts`, built to `api/index.cjs` during `npm run build`) runs the same Express app as the local server,
-so `ADMIN_PASSWORD` really is the source of truth there. Note that a password
-changed from Admin → Café Settings is written to `/tmp` and therefore reverts to
-`ADMIN_PASSWORD` on the next cold start — treat the env var as the permanent
-password and the settings screen as a temporary override.
+The checked-in Vercel Function entry point is `api/index.ts`; it delegates to
+`vercel-api/index.ts`, and `npm run build` also pre-bundles that handler to
+`api/index.cjs`. Keeping `api/index.ts` in Git is important: Vercel matches the
+`functions` configuration against source files in `api/`, not an artifact that
+is only created by the build command. The function runs the same Express app as
+the local server, so `ADMIN_PASSWORD` really is the source of truth there. Note
+that a password changed from Admin → Café Settings is written to `/tmp` and
+therefore reverts to `ADMIN_PASSWORD` on the next cold start — treat the env var
+as the permanent password and the settings screen as a temporary override.
 
 ## Options
 
@@ -68,5 +75,5 @@ the "Update Password" screen in Admin → Café Settings instead.
 ```bash
 npm install
 npm run dev      # http://localhost:3000
-npm run build    # production build (dist + server.cjs)
+npm run build    # production build (dist + server.cjs + api/index.cjs)
 ```
