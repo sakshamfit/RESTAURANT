@@ -6,8 +6,12 @@ import { readFile } from 'fs/promises';
 import dotenv from 'dotenv';
 
 dotenv.config();
-import { AppSnapshot, createMemorySnapshot, initialCategories, initialProducts, initialSettings, initialTables } from './seed';
-import { CafeCategory, CafeSettings, CafeTable, CustomerFeedback, Order, Product, WaiterCall } from '../types';
+// Explicit .js specifiers + type-only imports where only types are used: the
+// Vercel Function graph runs as native ESM, where extensionless relative
+// imports fail with ERR_MODULE_NOT_FOUND.
+import type { AppSnapshot } from './seed.js';
+import { createMemorySnapshot, initialCategories, initialProducts, initialSettings, initialTables } from './seed.js';
+import type { CafeCategory, CafeSettings, CafeTable, CustomerFeedback, Order, Product, WaiterCall } from '../types.js';
 
 export type StoreCollection = 'categories' | 'tables' | 'products' | 'orders' | 'feedbacks' | 'waiterCalls';
 export type StoreProvider = 'postgres' | 'file';

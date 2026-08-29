@@ -1,7 +1,10 @@
-import express, { NextFunction, Request, Response } from 'express';
+import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
-import {
+// Type-only import + explicit .js specifier: keeps the emitted ESM import (if
+// any) resolvable after Vercel transpiles this file to native ESM.
+import type {
   CafeCategory,
   CafeSettings,
   CafeTable,
@@ -12,16 +15,16 @@ import {
   Product,
   SalesSummary,
   WaiterCall,
-} from '../types';
-import { store, postgresConfigured, newId } from './store';
-import { initialSettings } from './seed';
+} from '../types.js';
+import { store, postgresConfigured, newId } from './store.js';
+import { initialSettings } from './seed.js';
 import {
   changeAdminPassword,
   getAdminAuthConfigurationError,
   getAdminEmail,
   getAdminSessionSecret,
   verifyAdminPassword,
-} from './auth';
+} from './auth.js';
 
 dotenv.config();
 

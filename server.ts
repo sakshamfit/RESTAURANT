@@ -2,9 +2,11 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
-import { store } from './src/server/store';
-import { initAdminAuth } from './src/server/auth';
-import { createApp } from './src/server/app';
+// Explicit .js specifiers so this file also runs correctly as native ESM
+// ("type": "module") after a plain tsc/esbuild transpile without bundling.
+import { store } from './src/server/store.js';
+import { initAdminAuth } from './src/server/auth.js';
+import { createApp } from './src/server/app.js';
 
 dotenv.config();
 

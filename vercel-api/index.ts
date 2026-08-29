@@ -20,9 +20,13 @@
 // or your own Postgres when DATABASE_URL is set, which is what makes the data
 // stable across instances and redeploys (option B).
 import type { IncomingMessage, ServerResponse } from 'http';
-import { createApp } from '../src/server/app';
-import { initAdminAuth } from '../src/server/auth';
-import { store } from '../src/server/store';
+// Explicit .js specifiers: the deployed Vercel Function runs these files as
+// native ESM ("type": "module"), where extensionless relative imports fail
+// with ERR_MODULE_NOT_FOUND. TypeScript and esbuild both map ".js" back onto
+// the ".ts" sources at build time.
+import { createApp } from '../src/server/app.js';
+import { initAdminAuth } from '../src/server/auth.js';
+import { store } from '../src/server/store.js';
 
 const app = createApp();
 
