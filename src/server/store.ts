@@ -35,8 +35,8 @@ const TABLES: Record<StoreCollection, string> = {
 
 function getSupabaseConfig() {
   const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-  const publicAnonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
+  const publicAnonKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
   const authKey = publicAnonKey || serviceKey;
   return { url, serviceKey, publicAnonKey, authKey, configured: Boolean(url && serviceKey) };
 }
@@ -81,13 +81,14 @@ function isMissingTableError(error: any) {
  */
 export class RestaurantStore {
   private ready: Promise<void>;
+  private useSupabase = Boolean(supabaseAdmin);
 
   constructor() {
     this.ready = this.initialize();
   }
 
   get provider(): 'supabase' | 'memory-preview' {
-    return supabaseConfigured ? 'supabase' : 'memory-preview';
+    return this.useSupabase ? 'supabase' : 'memory-preview';
   }
 
   async waitUntilReady() {
@@ -95,23 +96,34 @@ export class RestaurantStore {
   }
 
   private async initialize() {
-    if (!supabaseAdmin) return;
+    if (!supabaseAdmin || !this.useSupabase) return;
 
-    const { error } = await supabaseAdmin.from('app_settings').select('id').eq('id', 'config').maybeSingle();
-    if (error) {
-      if (isMissingTableError(error)) {
-        throw new Error('Supabase is configured but the database schema is missing. Run supabase/schema.sql in the Supabase SQL Editor.');
+    try {
+      const { error } = await supabaseAdmin.from('app_settings').select('id').eq('id', 'config').maybeSingle();
+      if (error) {
+        if (isMissingTableError(error)) {
+          const schemaError = new Error('Supabase is configured but the database schema is missing. Run supabase/schema.sql in the Supabase SQL Editor.');
+          (schemaError as Error & { code?: string }).code = 'SCHEMA_MISSING';
+          throw schemaError;
+        }
+        throw error;
       }
-      throw error;
-    }
 
-    // Seed only missing records. Existing menu edits and orders are never overwritten.
-    const settings = await this.getSettingsInternal();
-    if (!settings) await this.putSettingsInternal(initialSettings);
-    await this.seedMissing('categories', initialCategories);
-    await this.seedMissing('tables', initialTables);
-    await this.seedMissing('products', initialProducts);
-    await this.ensureCounter();
+      // Seed only missing records. Existing menu edits and orders are never overwritten.
+      const settings = await this.getSettingsInternal();
+      if (!settings) await this.putSettingsInternal(initialSettings);
+      await this.seedMissing('categories', initialCategories);
+      await this.seedMissing('tables', initialTables);
+      await this.seedMissing('products', initialProducts);
+      await this.ensureCounter();
+    } catch (error) {
+      // A local development preview should still boot when the sandbox cannot reach
+      // the owner's Supabase network. Production fails loudly instead of silently
+      // falling back to non-persistent storage.
+      if (process.env.NODE_ENV === 'production' || (error as { code?: string })?.code === 'SCHEMA_MISSING') throw error;
+      this.useSupabase = false;
+      console.warn('Supabase is configured but unavailable in this development preview; using memory-only preview data.', error);
+    }
   }
 
   private async seedMissing<C extends StoreCollection>(collection: C, records: CollectionModel[C][]) {
@@ -129,7 +141,7 @@ export class RestaurantStore {
   }
 
   private async ensureCounter() {
-    if (!supabaseAdmin) return;
+    if (!supabaseAdmin || !this.useSupabase) return;
     const { error } = await supabaseAdmin
       .from('app_counters')
       .upsert({ id: 'orders', value: 1040 }, { onConflict: 'id', ignoreDuplicates: true });
@@ -137,7 +149,7 @@ export class RestaurantStore {
   }
 
   private async listInternal<C extends StoreCollection>(collection: C): Promise<CollectionModel[C][]> {
-    if (!supabaseAdmin) {
+    if (!supabaseAdmin || !this.useSupabase) {
       return clone(memory[collection] as CollectionModel[C][]);
     }
 
@@ -153,7 +165,7 @@ export class RestaurantStore {
   }
 
   private async getInternal<C extends StoreCollection>(collection: C, id: string): Promise<CollectionModel[C] | null> {
-    if (!supabaseAdmin) {
+    if (!supabaseAdmin || !this.useSupabase) {
       const record = (memory[collection] as CollectionModel[C][]).find((item) => item.id === id);
       return record ? clone(record) : null;
     }
@@ -169,7 +181,7 @@ export class RestaurantStore {
 
   private async putInternal<C extends StoreCollection>(collection: C, id: string, record: CollectionModel[C]) {
     const value = { ...clone(record), id };
-    if (!supabaseAdmin) {
+    if (!supabaseAdmin || !this.useSupabase) {
       const records = memory[collection] as CollectionModel[C][];
       const index = records.findIndex((item) => item.id === id);
       if (index === -1) records.unshift(value);
@@ -203,7 +215,7 @@ export class RestaurantStore {
 
   async remove(collection: StoreCollection, id: string) {
     await this.ensureReady();
-    if (!supabaseAdmin) {
+    if (!supabaseAdmin || !this.useSupabase) {
       memory[collection] = (memory[collection] as Array<{ id: string }>).filter((item) => item.id !== id) as never;
       return;
     }
@@ -217,14 +229,14 @@ export class RestaurantStore {
   }
 
   private async getSettingsInternal(): Promise<CafeSettings | null> {
-    if (!supabaseAdmin) return clone(memory.settings);
+    if (!supabaseAdmin || !this.useSupabase) return clone(memory.settings);
     const { data, error } = await supabaseAdmin.from('app_settings').select('data').eq('id', 'config').maybeSingle();
     if (error) throw error;
     return data ? clone((data as DataRow<CafeSettings>).data) : null;
   }
 
   private async putSettingsInternal(settings: CafeSettings): Promise<CafeSettings> {
-    if (!supabaseAdmin) {
+    if (!supabaseAdmin || !this.useSupabase) {
       memory.settings = clone(settings);
       return clone(settings);
     }
@@ -257,7 +269,7 @@ export class RestaurantStore {
 
   async nextOrderNumber(): Promise<number> {
     await this.ensureReady();
-    if (!supabaseAdmin) {
+    if (!supabaseAdmin || !this.useSupabase) {
       memoryCounter += 1;
       return memoryCounter;
     }
@@ -267,7 +279,7 @@ export class RestaurantStore {
   }
 
   async uploadImage(dataUrl: string, productId: string): Promise<string> {
-    if (!supabaseAdmin || !dataUrl.startsWith('data:image/')) return dataUrl;
+    if (!supabaseAdmin || !this.useSupabase || !dataUrl.startsWith('data:image/')) return dataUrl;
     const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
     if (!match) throw new Error('Invalid image data.');
 

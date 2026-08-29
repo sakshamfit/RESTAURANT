@@ -84,7 +84,7 @@ async function requireAdminAuth(req: Request, res: Response, next: NextFunction)
   const token = getBearerToken(req);
   if (!token) return jsonError(res, 401, 'Unauthorized: Missing Supabase session.');
 
-  if (supabaseAdmin) {
+  if (supabaseAdmin && store.provider === 'supabase') {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
     if (error || !data.user) return jsonError(res, 401, 'Unauthorized: Supabase session is invalid or expired.');
     if (!data.user.email || data.user.email.toLowerCase() !== fallbackAdminEmail.toLowerCase()) {
@@ -140,8 +140,9 @@ app.get('/api/health', (_req, res) => {
     status: 'ok',
     app: 'Nagori Chai Point API',
     persistence: store.provider,
-    supabaseConfigured,
-    storage: supabaseConfigured ? 'supabase-storage' : 'memory-preview',
+    supabaseConfigured: store.provider === 'supabase',
+    supabaseCredentialsConfigured: supabaseConfigured,
+    storage: store.provider === 'supabase' ? 'supabase-storage' : 'memory-preview',
     timestamp: new Date().toISOString(),
   });
 });
@@ -339,7 +340,7 @@ app.post('/api/admin/login', async (req, res) => {
   const password = getIdentifier(req.body?.password);
   if (!password) return jsonError(res, 400, 'Password is required.');
 
-  if (supabaseAuth && supabaseAdmin) {
+  if (supabaseAuth && supabaseAdmin && store.provider === 'supabase') {
     const configuredEmail = fallbackAdminEmail.toLowerCase();
     const email = inputEmail.includes('@') ? inputEmail.toLowerCase() : configuredEmail;
     if (email !== configuredEmail) return jsonError(res, 401, 'Invalid admin credentials.');
@@ -653,7 +654,7 @@ app.post('/api/admin/change-password', requireAdminAuth, async (req: Request & {
   if (!currentPassword || !newPassword) return jsonError(res, 400, 'Current and new password are required.');
   if (newPassword.length < 6) return jsonError(res, 400, 'New password must be at least 6 characters.');
 
-  if (supabaseAdmin && supabaseAuth && req.adminUser?.id && req.adminUser.email) {
+  if (supabaseAdmin && supabaseAuth && store.provider === 'supabase' && req.adminUser?.id && req.adminUser.email) {
     const { error: verifyError } = await supabaseAuth.auth.signInWithPassword({ email: req.adminUser.email, password: currentPassword });
     if (verifyError) return jsonError(res, 401, 'Current password is incorrect.');
     const { error } = await supabaseAdmin.auth.admin.updateUserById(req.adminUser.id, { password: newPassword });
