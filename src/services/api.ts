@@ -181,7 +181,7 @@ export const api = {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Invalid admin credentials.');
+      throw new Error(err.error || 'Login failed. Please check your password and try again.');
     }
     const data = await res.json();
     if (data.token) {

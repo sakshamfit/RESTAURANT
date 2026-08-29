@@ -14,8 +14,8 @@
   },
   "admin": {
     "email": "nagori Tea Point",
-    "passwordHash": "e6e49308bcaadb9494c54dd1b0a37f716a140ee2e2a75e69e103072c8e76c8d571529b483b98e0788ac1a51761c9b36359c1720433cef116fdba5f49c0f59fba",
-    "salt": "8905610d49c95f9f742cb72a324e1e0b"
+    "passwordHash": "bc63206e324b8562abcf4c5022ab4c7541b6eb102abf5b282911c61ccaa70fcc28d42033743722ef68320cef0625e3f62b2e4e19d56d7135c55794abe4b92a0b",
+    "salt": "060fbb0092118643cb8a1d9f8fa1afdb"
   },
   "categories": [
     {

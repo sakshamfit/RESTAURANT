@@ -64,8 +64,14 @@ function hashPassword(password: string, salt?: string): { hash: string; salt: st
 }
 
 function verifyPassword(password: string, hash: string, salt: string): boolean {
-  const testHash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512').toString('hex');
-  return testHash === hash;
+  try {
+    const testHash = crypto.pbkdf2Sync(password, salt, 1000, 64, 'sha512');
+    const stored = Buffer.from(String(hash).trim(), 'hex');
+    if (testHash.length !== stored.length) return false;
+    return crypto.timingSafeEqual(testHash, stored);
+  } catch {
+    return false;
+  }
 }
 
 const defaultAdminCreds = hashPassword(process.env.ADMIN_PASSWORD || '9852120609');
@@ -85,7 +91,7 @@ const INITIAL_DATA: DatabaseSchema = {
     enableSoundAlerts: true,
   },
   admin: {
-    email: process.env.ADMIN_EMAIL || 'nagori Tea Point',
+    email: process.env.ADMIN_EMAIL || 'Nagori Tea Point',
     passwordHash: defaultAdminCreds.hash,
     salt: defaultAdminCreds.salt,
   },
@@ -336,12 +342,16 @@ function loadDatabase() {
         }
       });
 
-      // Ensure updated admin credentials and WhatsApp number
-      db.admin = {
-        email: 'ra7650384@gmail.com',
-        passwordHash: defaultAdminCreds.hash,
-        salt: defaultAdminCreds.salt,
-      };
+      // Seed the admin account only if it is missing — credentials stored in
+      // data/store.json persist across restarts (change it in Admin > Settings).
+      if (!db.admin || !db.admin.passwordHash || !db.admin.salt) {
+        const seeded = hashPassword(process.env.ADMIN_PASSWORD || '9852120609');
+        db.admin = {
+          email: process.env.ADMIN_EMAIL || 'Nagori Tea Point',
+          passwordHash: seeded.hash,
+          salt: seeded.salt,
+        };
+      }
       db.settings.whatsappNumber = '9852120609';
       db.settings.phone = '+91 9852120609';
       db.settings.upiId = '9852120609@upi';
@@ -813,52 +823,28 @@ app.post('/api/admin/login', (req: Request, res: Response) => {
   }
 
   const inputId = email ? String(email).trim().toLowerCase() : 'nagori tea point';
-  const allowedUsernames = [
+  const allowedUsernames = new Set([
     'nagori tea point',
     'nagoriteapoint',
     'nagori chai point',
     'nagori',
-    db.admin.email.toLowerCase(),
-    'raish9852120609@gmail.com',
-    'ra7650384@gmail.com',
     'admin',
-    'admin@nagoriteapoint.com',
-    'admin@nagori.com',
-    '9852120609',
-  ];
+    (db.admin.email || '').toLowerCase(),
+  ]);
 
-  const isUserMatch = allowedUsernames.includes(inputId);
-  if (!isUserMatch) {
+  if (!allowedUsernames.has(inputId)) {
     return res.status(401).json({ error: 'Invalid admin credentials.' });
   }
 
-  const inputPassword = String(password).trim();
-  const isHashValid = verifyPassword(inputPassword, db.admin.passwordHash, db.admin.salt);
-  const isDirectPasswordValid =
-    inputPassword === '9852120609' ||
-    inputPassword === 'admin123' ||
-    inputPassword === '9852120609@';
-
-  if (!isHashValid && !isDirectPasswordValid) {
+  if (!verifyPassword(String(password).trim(), db.admin.passwordHash, db.admin.salt)) {
     return res.status(401).json({ error: 'Incorrect password.' });
   }
-
-  // Update hash dynamically if needed to keep in sync
-  if (isDirectPasswordValid && !isHashValid) {
-    const newCreds = hashPassword(inputPassword, db.admin.salt);
-    db.admin.passwordHash = newCreds.hash;
-    saveDatabase();
-  }
-
-  // Always keep admin name as Nagori Tea Point
-  db.admin.email = 'nagori Tea Point';
-  saveDatabase();
 
   const token = generateAdminToken();
   res.json({
     success: true,
     token,
-    admin: { email: 'nagori Tea Point' },
+    admin: { email: db.admin.email },
   });
 });
 
@@ -1384,7 +1370,11 @@ app.post('/api/admin/change-password', requireAdminAuth, (req: Request, res: Res
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        // Allow the Arena preview host (*.e2b.app) so the app loads in the browser
+        allowedHosts: ['.e2b.app'],
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
