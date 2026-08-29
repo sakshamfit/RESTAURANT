@@ -15,7 +15,13 @@ import {
 } from '../types';
 import { store, postgresConfigured, newId } from './store';
 import { initialSettings } from './seed';
-import { changeAdminPassword, getAdminEmail, getAdminSessionSecret, verifyAdminPassword } from './auth';
+import {
+  changeAdminPassword,
+  getAdminAuthConfigurationError,
+  getAdminEmail,
+  getAdminSessionSecret,
+  verifyAdminPassword,
+} from './auth';
 
 dotenv.config();
 
@@ -159,6 +165,8 @@ function getBearerToken(req: Request) {
 // The single admin login: every admin request must carry the HMAC session
 // token issued by /api/admin/login (or still be within its 7-day expiry).
 function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
+  const configurationError = getAdminAuthConfigurationError();
+  if (configurationError) return jsonError(res, 503, configurationError);
   const token = getBearerToken(req);
   if (!token) return jsonError(res, 401, 'Unauthorized: Missing admin session.');
   const session = verifyAdminToken(token);
@@ -412,6 +420,9 @@ export function createApp() {
   // ----------------------------------------------------
   // The one and only login: the single admin password. No cloud auth service.
   app.post('/api/admin/login', (req, res) => {
+    const configurationError = getAdminAuthConfigurationError();
+    if (configurationError) return jsonError(res, 503, configurationError);
+
     const password = getIdentifier(req.body?.password);
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     if (!password) return jsonError(res, 400, 'Password is required.');
