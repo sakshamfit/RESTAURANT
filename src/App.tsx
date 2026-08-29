@@ -82,7 +82,7 @@ export default function App() {
       setActiveTableToken(queryTable);
       localStorage.setItem('nagori_scanned_table_token', queryTable);
       setIsAdminMode(false);
-    } else if (path.startsWith('/admin')) {
+    } else if (path.startsWith('/admin') || urlParams.get('admin') === 'true' || urlParams.get('admin') === '1') {
       setIsAdminMode(true);
     }
 
@@ -415,6 +415,7 @@ export default function App() {
             onAddToCart={handleAddToCart}
             onOpenCart={() => setIsCartOpen(true)}
             onOpenOrderHistory={() => setIsTableOrderHistoryOpen(true)}
+            onOpenAdmin={() => setIsAdminMode(true)}
           />
         </main>
       )}

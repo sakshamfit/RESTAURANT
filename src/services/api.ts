@@ -429,6 +429,22 @@ export const api = {
     return res.json();
   },
 
+  async adminEditCategory(id: string, name: string): Promise<{ success: boolean; category: CafeCategory; updatedProductsCount?: number }> {
+    const res = await fetch(`${API_BASE}/admin/categories/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAuthHeader(),
+      },
+      body: JSON.stringify({ name }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to update category.');
+    }
+    return res.json();
+  },
+
   async adminDeleteCategory(id: string): Promise<{ success: boolean }> {
     const res = await fetch(`${API_BASE}/admin/categories/${id}`, {
       method: 'DELETE',

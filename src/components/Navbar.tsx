@@ -96,20 +96,18 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
-          {/* Admin Switcher Button */}
-          <button
-            id="admin-mode-toggle-btn"
-            onClick={onToggleAdmin}
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-semibold border transition-all cursor-pointer ${
-              isAdmin
-                ? 'bg-white text-[#1e130c] border-white shadow-sm'
-                : 'bg-[#2c190e] text-[#e2d9d2] border-[#452c1e] hover:text-white hover:bg-[#3d2618]'
-            }`}
-          >
-            <ShieldCheck className="w-3.5 h-3.5 text-[#fb923c]" />
-            <span className="hidden sm:inline">{isAdmin ? 'Customer View' : 'Café Admin'}</span>
-            <span className="sm:hidden text-[11px]">{isAdmin ? 'Customer' : 'Admin'}</span>
-          </button>
+          {/* Admin Switcher Button - ONLY shown when already in Admin mode */}
+          {isAdmin && (
+            <button
+              id="admin-mode-toggle-btn"
+              onClick={onToggleAdmin}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-semibold border transition-all cursor-pointer bg-white text-[#1e130c] border-white shadow-sm"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-[#fb923c]" />
+              <span className="hidden sm:inline">Customer View</span>
+              <span className="sm:hidden text-[11px]">Customer</span>
+            </button>
+          )}
         </div>
       </div>
     </header>

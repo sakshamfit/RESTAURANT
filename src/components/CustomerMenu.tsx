@@ -1,7 +1,9 @@
 import React, { useState, useMemo } from 'react';
-import { Search, ShoppingBag, ArrowRight, UtensilsCrossed, Bell, CheckCircle2, QrCode } from 'lucide-react';
+import { Search, ShoppingBag, ArrowRight, UtensilsCrossed, Bell, CheckCircle2, QrCode, Loader2, Volume2, Sparkles } from 'lucide-react';
 import { Product, CafeCategory, CafeTable, CartItem, CafeSettings } from '../types';
 import { ProductCard } from './ProductCard';
+import { api } from '../services/api';
+import { unlockAudio } from '../utils/audioAlerts';
 
 interface CustomerMenuProps {
   table: CafeTable;
@@ -12,6 +14,7 @@ interface CustomerMenuProps {
   onAddToCart: (item: CartItem) => void;
   onOpenCart: () => void;
   onOpenOrderHistory?: () => void;
+  onOpenAdmin?: () => void;
 }
 
 const CATEGORY_ICONS: Record<string, string> = {
@@ -32,10 +35,13 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
   onAddToCart,
   onOpenCart,
   onOpenOrderHistory,
+  onOpenAdmin,
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
+  const [isCallingWaiter, setIsCallingWaiter] = useState<boolean>(false);
   const [waiterCalled, setWaiterCalled] = useState<boolean>(false);
+  const [waiterNotice, setWaiterNotice] = useState<string | null>(null);
 
   const filteredProducts = useMemo(() => {
     return products.filter((p) => {
@@ -51,9 +57,34 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
   const totalCartCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
   const totalCartAmount = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
-  const handleCallWaiter = () => {
-    setWaiterCalled(true);
-    setTimeout(() => setWaiterCalled(false), 3500);
+  const handleCallWaiter = async () => {
+    if (isCallingWaiter) return;
+    try {
+      setIsCallingWaiter(true);
+      unlockAudio();
+      await api.callWaiter({
+        tableToken: table.token,
+        tableId: table.id,
+        tableNumber: table.tableNumber,
+        tableName: table.name,
+        customerName: 'Customer at ' + table.name,
+      });
+
+      setWaiterCalled(true);
+      setWaiterNotice(`🔔 Waiter requested for ${table.name}! Staff will arrive at your table shortly.`);
+
+      // Reset button state after a period
+      setTimeout(() => {
+        setWaiterCalled(false);
+      }, 10000);
+      setTimeout(() => {
+        setWaiterNotice(null);
+      }, 7000);
+    } catch (err: any) {
+      alert(err?.message || 'Unable to alert waiter. Please ask staff directly.');
+    } finally {
+      setIsCallingWaiter(false);
+    }
   };
 
   return (
@@ -89,17 +120,24 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
 
               <button
                 onClick={handleCallWaiter}
-                disabled={waiterCalled}
-                className={`w-full py-2 px-4 rounded-full text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                disabled={isCallingWaiter || waiterCalled}
+                className={`w-full py-2.5 px-4 rounded-full text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-xs ${
                   waiterCalled
                     ? 'bg-emerald-600 text-white'
-                    : 'bg-[#ea580c] hover:bg-[#c2410c] text-white shadow-xs'
+                    : isCallingWaiter
+                    ? 'bg-orange-700 text-white opacity-80'
+                    : 'bg-[#ea580c] hover:bg-[#c2410c] text-white'
                 }`}
               >
-                {waiterCalled ? (
+                {isCallingWaiter ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Calling Staff...</span>
+                  </>
+                ) : waiterCalled ? (
                   <>
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>Waiter Notified</span>
+                    <span>Waiter Notified ✓</span>
                   </>
                 ) : (
                   <>
@@ -112,6 +150,27 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
           </div>
         </div>
       </section>
+
+      {/* Floating Waiter Call Toast Alert */}
+      {waiterNotice && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 w-11/12 max-w-md animate-in fade-in slide-in-from-top-4 duration-300">
+          <div className="bg-emerald-700 text-white p-4 rounded-2xl shadow-2xl border border-emerald-500/50 flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
+              <Bell className="w-5 h-5 animate-bounce" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-bold leading-snug">{waiterNotice}</p>
+              <p className="text-[10px] text-emerald-100 mt-0.5">Assistance is on the way to your table.</p>
+            </div>
+            <button
+              onClick={() => setWaiterNotice(null)}
+              className="px-2 py-1 bg-white/20 hover:bg-white/30 text-white text-xs font-bold rounded-lg cursor-pointer"
+            >
+              OK
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Layout */}
       <div className="max-w-7xl w-full mx-auto px-4 sm:px-8 pt-8 flex-1 flex flex-col lg:flex-row gap-8">
@@ -285,6 +344,20 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Footer info */}
+      <footer className="max-w-7xl w-full mx-auto px-4 sm:px-8 mt-12 pt-6 border-t border-[#e7e2dc] text-center text-xs text-[#78716c] flex flex-col sm:flex-row items-center justify-between gap-2">
+        <p>© {new Date().getFullYear()} {settings.cafeName}. All rights reserved.</p>
+        {onOpenAdmin && (
+          <button
+            onClick={onOpenAdmin}
+            className="text-[11px] text-[#a89f91] hover:text-[#78716c] transition-colors cursor-pointer"
+            title="Management Access"
+          >
+            Owner / Staff Login
+          </button>
+        )}
+      </footer>
 
       {/* Floating Bottom Sticky Cart Bar on Mobile/Tablet */}
       {totalCartCount > 0 && (

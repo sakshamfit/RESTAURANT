@@ -13,9 +13,9 @@
     "enableSoundAlerts": true
   },
   "admin": {
-    "email": "ra7650384@gmail.com",
-    "passwordHash": "fa24d62d44d5e146fbb60ea20992237d796464716ce694493255ea06c8f5f8e943b047f34cfc9c9b596469ca46df5a2c47f4c27902adb7441c0b7482e5e65ab6",
-    "salt": "fd61333a1e5fdbeacdda6259fcfff20d"
+    "email": "nagori Tea Point",
+    "passwordHash": "e6e49308bcaadb9494c54dd1b0a37f716a140ee2e2a75e69e103072c8e76c8d571529b483b98e0788ac1a51761c9b36359c1720433cef116fdba5f49c0f59fba",
+    "salt": "8905610d49c95f9f742cb72a324e1e0b"
   },
   "categories": [
     {
