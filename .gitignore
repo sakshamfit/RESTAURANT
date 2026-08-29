@@ -8,3 +8,6 @@ coverage/
 !.env.example
 data/*.json
 data/*.json.tmp
+api/index.cjs
+api/*.map
+api/*.tmp

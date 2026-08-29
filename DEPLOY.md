@@ -26,7 +26,7 @@ Vercel → Project → **Settings → Environment Variables**:
 Every deploy/cold start will use that as the admin password — stable and safe.
 Set `ADMIN_EMAIL` too if you want a different admin email label.
 
-The Vercel API (`api/index.ts`) runs the same Express app as the local server,
+The Vercel API (source at `vercel-api/index.ts`, built to `api/index.cjs` during `npm run build`) runs the same Express app as the local server,
 so `ADMIN_PASSWORD` really is the source of truth there. Note that a password
 changed from Admin → Café Settings is written to `/tmp` and therefore reverts to
 `ADMIN_PASSWORD` on the next cold start — treat the env var as the permanent
