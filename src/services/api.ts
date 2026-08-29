@@ -161,14 +161,24 @@ export const api = {
 
   // Admin Authentication
   async adminLogin(email: string, password: string): Promise<{ success: boolean; token: string }> {
-    const res = await fetch(`${API_BASE}/admin/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${API_BASE}/admin/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+    } catch {
+      throw new Error('Cannot reach the server. Please check your connection and that the backend is running, then try again.');
+    }
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Login failed. Please check your password and try again.');
+      if (err?.error) throw new Error(err.error);
+      // No JSON error body → the backend API is missing (static hosting, wrong port, proxy error).
+      throw new Error(
+        `Login service unreachable (HTTP ${res.status}). The app is being served without its backend API. ` +
+          'Start it with "npm run dev" (or "npm run build && npm start") so /api is available — this is not a password problem.'
+      );
     }
     const data = await res.json();
     if (data.token) {
