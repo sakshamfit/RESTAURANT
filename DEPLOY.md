@@ -78,14 +78,33 @@ stored and why:
 - `"persistence": "postgres"` → real database in use, data is durable. ✅
 - `"persistence": "file"` + `"postgresConfigured": true` → the database URL is
   set but unreachable. The `postgres.error` field shows the exact failure
-  (message, code, phase) and the backend keeps retrying in the background
-  (30s → 5min backoff), so it heals itself the moment the database comes back.
+  (message, code, phase) plus an actionable `hint`, and the backend keeps
+  retrying in the background (30s → 5min backoff), so it heals itself the
+  moment the database comes back. Anything recorded locally while the
+  database was down is automatically carried over into Postgres on reconnect,
+  so orders and feedback never disappear at the moment the connection heals.
 - `"persistence": "file"` + `"postgresConfigured": false` → no database
   configured: data is per-instance temporary storage and resets on cold starts
   (see Options A/B above).
 
 The Admin dashboard also shows a warning banner whenever data is not going to
-the real database.
+the real database, including the exact error and the hint from the table
+below.
+
+### Common `postgres.error` codes and how to fix them
+
+| `code` | What it means | Fix |
+| --- | --- | --- |
+| `28P01` | Postgres rejected the login: the password in `DATABASE_URL` is wrong/stale, or the username was hand-edited (on Supabase it must be the full `postgres.<project-ref>`, not just `postgres`). | Supabase → Project → **Settings → Database → Connection string** → copy the current **Session pooler** URI and paste it verbatim into Vercel → **Settings → Environment Variables → `DATABASE_URL`** (and `DIRECT_URL` if set) → **redeploy**. |
+| `3D000` | The database name in the URL does not exist. | Re-copy the connection string; check the project was not paused/deleted. |
+| `57P03` | The database is asleep or starting up (free projects pause when idle). | Nothing — the backend retries automatically and connects when it wakes. |
+| `ENOTFOUND` / `EAI_AGAIN` | Hostname in the URL cannot be resolved. | Re-copy the connection string from the provider dashboard. |
+| `ECONNREFUSED` / `ETIMEDOUT` | Host/port unreachable (or IP allowlists block Vercel). | Check host/port match the dashboard; allow connections from anywhere. |
+| SSL errors | The server refused the TLS handshake. | Use the provider's TLS host (Supabase pooler, port 6543). |
+| parse errors | The URL is not a valid `postgresql://` string. | Copy it verbatim from the dashboard — don't hand-edit. |
+
+Note: changing environment variables in Vercel only affects **new**
+deployments, so always redeploy after updating `DATABASE_URL`.
 
 ## Local development
 

@@ -33,7 +33,14 @@ export interface StoreDiagnostics {
   /** Hostname only — never credentials. */
   postgresHost: string;
   postgresStatus: 'connected' | 'unavailable' | 'not-configured';
-  postgresError: { message: string; code?: string; phase: PostgresPhase; at: string } | null;
+  postgresError: {
+    message: string;
+    code?: string;
+    phase: PostgresPhase;
+    at: string;
+    /** Plain-English, actionable explanation of the failure and how to fix it. */
+    hint?: string;
+  } | null;
   postgresRecoveryAttempts: number;
   postgresLastProbeAt: string | null;
   dataFile: string;
@@ -97,9 +104,100 @@ function isFatalPersistError(error: any): boolean {
 // ── Direct Postgres persistence (optional, lazy-loaded) ─────────────────────
 // pg is imported dynamically only when DATABASE_URL is set, so the module
 // never fails to load on platforms like Vercel where pg may not be bundled.
-const pgUrl = process.env.DATABASE_URL || '';
-const pgDirectUrl = process.env.DIRECT_URL || pgUrl;
+/**
+ * DATABASE_URL as pasted into a dashboard commonly arrives with surrounding
+ * quotes or stray whitespace (copying a `.env`-style line verbatim), which
+ * corrupts the password and fails with a confusing 28P01. Normalize once at
+ * module load so the value used everywhere is the one the provider issued.
+ */
+function normalizeConnectionString(name: string, rawValue: string): string {
+  let value = rawValue.trim();
+  if (
+    value.length >= 2 &&
+    ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
+  ) {
+    value = value.slice(1, -1).trim();
+    console.warn(`[store] Removed surrounding quotes from ${name} (a common copy-paste slip when pasting .env lines into a dashboard).`);
+  }
+  return value;
+}
+
+const pgUrl = normalizeConnectionString('DATABASE_URL', process.env.DATABASE_URL || '');
+const pgDirectUrl = normalizeConnectionString('DIRECT_URL', process.env.DIRECT_URL || '') || pgUrl;
 export const postgresConfigured = Boolean(pgUrl);
+
+/** Validates the configured URL as early as possible (cheap, no network). */
+function pgUrlParseError(connectionString: string): string | null {
+  try {
+    const url = new URL(connectionString);
+    if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') {
+      return `DATABASE_URL must start with postgres:// or postgresql:// (found "${url.protocol}").`;
+    }
+    if (!url.hostname) return 'DATABASE_URL has no hostname.';
+    return null;
+  } catch (error) {
+    return `DATABASE_URL could not be parsed as a connection string: ${(error as Error)?.message || error}. Re-copy it from your database provider dashboard.`;
+  }
+}
+
+/**
+ * Turns a Postgres failure into a plain-English, actionable hint, surfaced by
+ * /api/health and the admin warning banner. Never includes credentials.
+ * Exported so the mapping itself can be unit-tested without a live database.
+ */
+export function pgErrorHint(error: { code?: string; message: string }, host: string, phase: PostgresPhase): string {
+  const message = error.message || '';
+  const code = error.code || '';
+  const provider = /supabase/i.test(host) ? 'Supabase' : /neon/i.test(host) ? 'Neon' : 'your Postgres provider';
+
+  if (code === '28P01') {
+    if (/supabase/i.test(host)) {
+      return (
+        `Supabase rejected the login: the password in DATABASE_URL is wrong or stale, or the username is missing its project ref ` +
+        `(it must be the full \`postgres.<project-ref>\` from the connection string — not just \`postgres\`). ` +
+        `Fix: Supabase → Project → Settings → Database → Connection string → copy the current Session pooler URI and paste it ` +
+        `verbatim into Vercel → Settings → Environment Variables → DATABASE_URL (and DIRECT_URL if set), then redeploy.`
+      );
+    }
+    return (
+      `${provider} rejected the password in DATABASE_URL (the password is wrong or was rotated after the URL was saved). ` +
+      `Copy the current connection string from your provider dashboard into Vercel → Settings → Environment Variables → DATABASE_URL, then redeploy.`
+    );
+  }
+  if (code === 'INVALID_DATABASE_URL') {
+    // The message produced by pgUrlParseError already says exactly what is wrong and what to do.
+    return message;
+  }
+  if (code === '3D000') {
+    return `The database named in DATABASE_URL does not exist (or was renamed/deleted). Check the database name in the connection string and that the project is still running.`;
+  }
+  if (code === '57P03' || /starting up|crash|recovery/i.test(message)) {
+    return `The database is asleep or starting up (free ${provider} projects pause when idle). The backend retries automatically and will connect as soon as it wakes.`;
+  }
+  if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(message)) {
+    return `The host in DATABASE_URL could not be resolved. Re-copy the connection string from your provider dashboard (a hand-edited hostname is usually the cause).`;
+  }
+  if (/ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|network is unreachable|connect ETIMEDOUT/i.test(message)) {
+    return `The database host could not be reached. Check that the host/port in DATABASE_URL match the provider dashboard and that the provider allows connections from anywhere (${provider} defaults allow this).`;
+  }
+  if (/does not support SSL|SSL is not enabled|no pg_hba/i.test(message)) {
+    return `The database server refused the SSL handshake the app requires. Use the provider's TLS-enabled host (e.g. the pooler host on port 6543 for Supabase) in DATABASE_URL.`;
+  }
+  if (/The connection string must start with|password is missing|missing password|no password/i.test(message)) {
+    return `DATABASE_URL is not a valid Postgres connection string (missing scheme or password). Copy it verbatim from your provider dashboard — it must look like postgresql://user:password@host:5432/dbname.`;
+  }
+  if (/pgbouncer|cannot run|prepared statement/i.test(message)) {
+    return `A pooler URL was used for an operation that needs a direct connection. Set DATABASE_URL to the pooler URI (port 6543) and DIRECT_URL to the direct URI (port 5432) from your provider dashboard.`;
+  }
+  if (/self-signed|self signed|unable to verify the first certificate|DEPTH_ZERO|CERT_HAS_EXPIRED/i.test(message)) {
+    return `The database TLS certificate could not be verified. If the provider was recently migrated/changed regions, re-copy the connection string and redeploy.`;
+  }
+  if (/password authentication failed/i.test(message)) {
+    // Same class as 28P01 but reported without a SQLSTATE.
+    return `The database rejected the password in DATABASE_URL. Copy the current connection string from your provider dashboard and update DATABASE_URL in Vercel, then redeploy.`;
+  }
+  return `The database connection failed during the '${phase}' step. Check that DATABASE_URL in Vercel matches the provider dashboard exactly, then redeploy.`;
+}
 
 const PG_FAMILY = 4;
 const PG_TIMEOUT_MS = Number(process.env.PG_CONNECT_TIMEOUT_MS || 15000);
@@ -434,14 +532,26 @@ export class RestaurantStore {
   }
 
   /**
-   * One full Postgres bootstrap attempt: SSL probe → schema check/apply →
-   * seed → counter. Every failure is recorded with the phase it happened in,
-   * so /api/health can report exactly why the database is not in use.
+   * One full Postgres bootstrap attempt: URL sanity check → SSL probe →
+   * schema check/apply → seed → migrate local records → counter. Every
+   * failure is recorded with the phase it happened in plus an actionable
+   * hint, so /api/health and the admin banner can explain exactly why the
+   * database is not in use and what to do about it.
    */
   private async initPostgresOnce(): Promise<boolean> {
     this.pgLastProbeAt = new Date().toISOString();
     this.pgRecoveryAttempts += 1;
+    let host = '';
     try {
+      host = new URL(pgUrl).hostname;
+    } catch {
+      host = '';
+    }
+    try {
+      // Fail fast on a URL that can never work, before any network I/O.
+      this.pgPhase = 'connect';
+      const parseError = pgUrlParseError(pgUrl);
+      if (parseError) throw Object.assign(new Error(parseError), { code: 'INVALID_DATABASE_URL' });
       this.pgPhase = 'ssl-probe';
       await this.ensurePostgresSchema();
       this.pgPhase = 'seed';
@@ -450,6 +560,9 @@ export class RestaurantStore {
       await this.seedMissing('categories', initialCategories);
       await this.seedMissing('tables', initialTables);
       await this.seedMissing('products', initialProducts);
+      // Carry over anything recorded locally while the database was down, so
+      // orders/feedback never vanish at the moment the connection heals.
+      await this.migrateLocalRecordsToPostgres();
       this.pgPhase = 'counter';
       await this.ensureCounter();
       // If the store already issued order numbers from the local file, make
@@ -461,11 +574,14 @@ export class RestaurantStore {
       return true;
     } catch (error) {
       this.usePostgres = false;
+      const message = (error as Error)?.message || String(error);
+      const code = (error as { code?: string })?.code;
       this.pgError = {
-        message: (error as Error)?.message || String(error),
-        code: (error as { code?: string })?.code,
+        message,
+        code,
         phase: this.pgPhase,
         at: new Date().toISOString(),
+        hint: pgErrorHint({ message, code }, host, this.pgPhase),
       };
       console.warn(
         `[store] Postgres configured but unreachable during '${this.pgPhase}'; using the local data file instead.`,
@@ -592,6 +708,59 @@ export class RestaurantStore {
         .filter((record) => !existingIds.has(record.id))
         .map((record) => this.putInternal(collection, record.id, record))
     );
+  }
+
+  /**
+   * When the store starts on the local file (database down/bad credentials)
+   * and later connects to Postgres, copy every local record that does not
+   * already exist there (insert-if-absent by id). Otherwise the moment the
+   * connection heals, orders, feedbacks and menu edits recorded in the
+   * meantime would silently "disappear" from the UI — the exact failure the
+   * storage-health banner warns about. Existing Postgres rows stay
+   * authoritative; only records that exist locally and not in Postgres are
+   * carried over, so this is safe to run on every (re)connect.
+   */
+  private async migrateLocalRecordsToPostgres() {
+    const pool = await getPool();
+    const collections: StoreCollection[] = ['categories', 'tables', 'products', 'orders', 'feedbacks', 'waiterCalls'];
+    let migrated = 0;
+    for (const collection of collections) {
+      const local = this.memory[collection] as unknown as Array<{ id: string; createdAt?: string }>;
+      if (!Array.isArray(local) || local.length === 0) continue;
+      const table = pgTableName(collection);
+      for (const record of local) {
+        if (!record || !record.id) continue;
+        const timestamp = record.createdAt || now();
+        try {
+          await pool.query(
+            `insert into "${table}" (id, data, created_at, updated_at)
+             values ($1, $2::jsonb, $3, $3)
+             on conflict (id) do nothing`,
+            [record.id, JSON.stringify(record), timestamp]
+          );
+          migrated += 1;
+        } catch (error) {
+          // One bad record must not strand the rest or abort the switch.
+          console.warn(`[store] Could not migrate ${collection}/${record.id} to Postgres:`, (error as Error)?.message || error);
+        }
+      }
+    }
+    const localSettings = this.memory.settings;
+    if (localSettings) {
+      try {
+        await pool.query(
+          `insert into app_settings (id, data, updated_at)
+           values ('config', $1::jsonb, $2)
+           on conflict (id) do nothing`,
+          [JSON.stringify(localSettings), now()]
+        );
+      } catch (error) {
+        console.warn('[store] Could not migrate local settings to Postgres:', (error as Error)?.message || error);
+      }
+    }
+    if (migrated > 0) {
+      console.log(`[store] Carried ${migrated} local record(s) over to Postgres (they were saved while the database was unreachable).`);
+    }
   }
 
   private async ensureReady() {
