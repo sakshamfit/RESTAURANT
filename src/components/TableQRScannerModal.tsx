@@ -7,7 +7,6 @@ import {
   Zap,
 } from 'lucide-react';
 import { CafeTable } from '../types';
-import { playScanSuccessBeep } from '../utils/audioAlerts';
 
 interface TableQRScannerModalProps {
   isOpen: boolean;
@@ -78,8 +77,6 @@ export const TableQRScannerModal: React.FC<TableQRScannerModalProps> = ({
   };
 
   const handleSuccessfulDetection = (detected: { identifier: string; name?: string }) => {
-    playScanSuccessBeep();
-    
     const matched = availableTables.find(
       (t) =>
         t.token === detected.identifier ||

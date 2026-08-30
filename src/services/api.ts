@@ -345,10 +345,28 @@ export const api = {
 
     const res = await fetchWithRetry(`${API_BASE}/admin/orders?${params.toString()}`, {
       headers: { ...getAuthHeader() },
+      cache: 'no-store',
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Failed to fetch orders.');
+    }
+    return res.json();
+  },
+
+  /**
+   * Read every table's orders with no table/status filter. The hotel dashboard
+   * uses this source to detect incoming orders from Table 1, Table 2, Table 3,
+   * and tables added later without touching any saved order data.
+   */
+  async adminGetAllTableOrders(): Promise<{ orders: Order[] }> {
+    const res = await fetchWithRetry(`${API_BASE}/admin/orders?scope=all-tables`, {
+      headers: { ...getAuthHeader() },
+      cache: 'no-store',
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to fetch all table orders.');
     }
     return res.json();
   },

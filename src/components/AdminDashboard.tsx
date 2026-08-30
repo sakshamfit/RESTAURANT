@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Coffee,
   ShoppingBag,
@@ -8,14 +8,10 @@ import {
   Settings as SettingsIcon,
   LogOut,
   Bell,
-  BellRing,
-  RefreshCw,
   Eye,
-  CheckCircle2,
   Volume2,
   VolumeX,
   Star,
-  UserCheck,
 } from 'lucide-react';
 import { Order, Product, CafeTable, CafeCategory, CafeSettings, WaiterCall } from '../types';
 import { api, BackendHealth } from '../services/api';
@@ -26,7 +22,12 @@ import { AdminReports } from './AdminReports';
 import { AdminSettings } from './AdminSettings';
 import { AdminWaiterCalls } from './AdminWaiterCalls';
 import { AdminFeedbacks } from './AdminFeedbacks';
-import { playLoudOrderSiren, stopSiren, unlockAudio } from '../utils/audioAlerts';
+import {
+  announceOrderReceived,
+  prepareOrderVoiceAnnouncements,
+  previewOrderVoiceAnnouncement,
+  stopOrderVoiceAnnouncements,
+} from '../utils/orderVoiceAnnouncements';
 
 interface AdminDashboardProps {
   adminEmail: string;
@@ -49,39 +50,88 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [categories, setCategories] = useState<CafeCategory[]>([]);
   const [settings, setSettings] = useState<CafeSettings | null>(null);
   const [backendHealth, setBackendHealth] = useState<BackendHealth | null>(null);
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
-  const [isSirenActive, setIsSirenActive] = useState<boolean>(false);
-  const [sirenMessage, setSirenMessage] = useState<string>('🚨 LIVE LOUD SIREN: NEW ORDER RECEIVED! KITCHEN ALERT!');
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
+  const [isVoiceAnnouncementActive, setIsVoiceAnnouncementActive] = useState<boolean>(false);
+  const [voiceAnnouncementMessage, setVoiceAnnouncementMessage] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(true);
 
-  const prevOrdersCountRef = useRef<number>(0);
-  const prevWaiterCallsCountRef = useRef<number>(0);
+  // We identify incoming orders by their immutable ID, never by a count. That
+  // means two tables ordering together are both announced, even if a staff
+  // member changes one order's status before the next dashboard refresh.
+  const knownOrderIdsRef = useRef<Set<string>>(new Set());
+  const hasInitialOrderSnapshotRef = useRef<boolean>(false);
+  const dashboardOpenedAtRef = useRef<number>(Date.now());
+  const voiceEnabledRef = useRef<boolean>(true);
 
-  // Trigger loud kitchen siren alert (सायरन)
-  const triggerSirenAlert = (msg: string) => {
-    if (!soundEnabled) return;
-    unlockAudio();
-    setSirenMessage(msg);
-    setIsSirenActive(true);
-    playLoudOrderSiren(5);
-    setTimeout(() => {
-      setIsSirenActive(false);
-    }, 5000);
+  useEffect(() => {
+    voiceEnabledRef.current = voiceEnabled;
+    if (!voiceEnabled) {
+      stopOrderVoiceAnnouncements();
+      setIsVoiceAnnouncementActive(false);
+    }
+  }, [voiceEnabled]);
+
+  const stopVoiceAnnouncement = () => {
+    stopOrderVoiceAnnouncements();
+    setIsVoiceAnnouncementActive(false);
   };
 
-  const handleTestSiren = () => {
-    unlockAudio();
-    setSirenMessage('🔔 TEST ALERT: SOUND & SIREN OPERATIONAL');
-    setIsSirenActive(true);
-    playLoudOrderSiren(3.5);
-    setTimeout(() => {
-      setIsSirenActive(false);
-    }, 3500);
+  const announceOrders = (incomingOrders: Order[]) => {
+    if (!voiceEnabledRef.current) return;
+
+    incomingOrders
+      .sort((a, b) => new Date(a.timeline.createdAt).getTime() - new Date(b.timeline.createdAt).getTime())
+      .forEach((order) => {
+        announceOrderReceived(order, {
+          onStart: (message) => {
+            setVoiceAnnouncementMessage(`AI order voice: ${message}`);
+            setIsVoiceAnnouncementActive(true);
+          },
+          onFinish: () => setIsVoiceAnnouncementActive(false),
+        });
+      });
   };
 
-  const handleSilenceSiren = () => {
-    stopSiren();
-    setIsSirenActive(false);
+  /**
+   * The admin all-table order endpoint is read-only. It returns orders from
+   * Table 1, Table 2, Table 3, and every table added later; this dashboard
+   * only observes the response and never changes saved order data.
+   */
+  const applyAllTableOrders = (nextOrders: Order[]) => {
+    const newlyObserved = nextOrders.filter((order) => !knownOrderIdsRef.current.has(order.id));
+    nextOrders.forEach((order) => knownOrderIdsRef.current.add(order.id));
+
+    if (!hasInitialOrderSnapshotRef.current) {
+      hasInitialOrderSnapshotRef.current = true;
+      // Do not speak old history when staff opens the dashboard. An order made
+      // while this first request was loading is still announced so it is not
+      // lost in the opening race.
+      const receivedWhileOpening = newlyObserved.filter(
+        (order) => new Date(order.timeline.createdAt).getTime() >= dashboardOpenedAtRef.current
+      );
+      announceOrders(receivedWhileOpening);
+    } else {
+      announceOrders(newlyObserved);
+    }
+
+    setOrders(nextOrders);
+  };
+
+  const handleTestVoice = () => {
+    prepareOrderVoiceAnnouncements();
+    const started = previewOrderVoiceAnnouncement({
+      onStart: (message) => {
+        setVoiceAnnouncementMessage(`AI order voice: ${message}`);
+        setIsVoiceAnnouncementActive(true);
+      },
+      onFinish: () => setIsVoiceAnnouncementActive(false),
+    });
+
+    if (!started) {
+      setVoiceAnnouncementMessage('AI order voice is unavailable in this browser.');
+      setIsVoiceAnnouncementActive(true);
+      window.setTimeout(() => setIsVoiceAnnouncementActive(false), 4_000);
+    }
   };
 
   const fetchAllData = async (isInitial = false) => {
@@ -89,7 +139,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       if (isInitial) setLoading(true);
 
       const [ordersRes, waiterCallsRes, productsRes, tablesRes, categoriesRes, settingsRes] = await Promise.all([
-        api.adminGetOrders(),
+        // No table filter is sent here: this is the all-table source used for
+        // live Table 1 / 2 / 3 (and future table) order detection.
+        api.adminGetAllTableOrders(),
         api.adminGetWaiterCalls(),
         api.adminGetProducts(),
         api.adminGetTables(),
@@ -103,26 +155,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         .then((health) => setBackendHealth(health))
         .catch(() => setBackendHealth(null));
 
-      const newOrders = ordersRes.orders;
-      const newCalls = waiterCallsRes.calls || [];
-
-      // Check if a new order arrived compared to previous count
-      const newOrdersCount = newOrders.filter((o) => o.status === 'new').length;
-      if (!isInitial && newOrders.length > prevOrdersCountRef.current && newOrdersCount > 0) {
-        triggerSirenAlert('🚨 LIVE LOUD SIREN: NEW ORDER RECEIVED! KITCHEN ALERT!');
-      }
-      prevOrdersCountRef.current = newOrders.length;
-
-      // Check if a new waiter call arrived
-      const pendingCalls = newCalls.filter((c) => c.status === 'pending');
-      if (!isInitial && pendingCalls.length > prevWaiterCallsCountRef.current) {
-        const latestPending = pendingCalls[0];
-        triggerSirenAlert(`🔔 WAITER CALLED AT TABLE ${latestPending?.tableNumber || ''}! ASSISTANCE REQUESTED!`);
-      }
-      prevWaiterCallsCountRef.current = pendingCalls.length;
-
-      setOrders(newOrders);
-      setWaiterCalls(newCalls);
+      applyAllTableOrders(ordersRes.orders);
+      setWaiterCalls(waiterCallsRes.calls || []);
       setProducts(productsRes.products);
       setTables(tablesRes.tables);
       setCategories(categoriesRes.categories);
@@ -135,21 +169,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   useEffect(() => {
+    prepareOrderVoiceAnnouncements();
+
+    // Most browsers make their full voice list available after a user gesture.
+    // This listener never produces audio; it only prepares the feminine voice
+    // selection for later automatic incoming-order announcements.
+    const warmVoiceList = () => prepareOrderVoiceAnnouncements();
+    window.addEventListener('pointerdown', warmVoiceList, { once: true });
+    window.addEventListener('keydown', warmVoiceList, { once: true });
+
     fetchAllData(true);
 
-    // Synchronize every 5 seconds (local polling — no cloud realtime needed)
-    const interval = setInterval(() => {
+    // Poll the all-table admin endpoint on the existing dashboard cadence.
+    // Polling keeps this compatible with local file storage and serverless
+    // deployments while automatically catching orders from every table.
+    const interval = window.setInterval(() => {
       fetchAllData(false);
-    }, 5000);
+    }, 5_000);
 
     return () => {
-      clearInterval(interval);
-      stopSiren();
+      window.clearInterval(interval);
+      window.removeEventListener('pointerdown', warmVoiceList);
+      window.removeEventListener('keydown', warmVoiceList);
+      stopOrderVoiceAnnouncements();
     };
-  }, [soundEnabled]);
+  }, []);
 
-  const newOrdersCount = orders.filter((o) => o.status === 'new').length;
-  const pendingCallsCount = waiterCalls.filter((c) => c.status === 'pending').length;
+  const newOrdersCount = orders.filter((order) => order.status === 'new').length;
+  const pendingCallsCount = waiterCalls.filter((call) => call.status === 'pending').length;
 
   if (loading && !settings) {
     return (
@@ -166,24 +213,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     <div className="min-h-screen bg-stone-100 flex flex-col">
       {/* Top Admin Navigation Header */}
       <header className="bg-stone-950 text-white border-b border-stone-800 sticky top-0 z-30 shadow-md">
-        {/* Siren Alert Banner if active */}
-        {isSirenActive && (
-          <div className="bg-red-600 text-white px-4 py-2 text-xs font-black flex items-center justify-between animate-pulse">
+        {/* The existing alert area is now reserved for the spoken AI order message. */}
+        {isVoiceAnnouncementActive && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="bg-orange-600 text-white px-4 py-2 text-xs font-black flex items-center justify-between"
+          >
             <div className="flex items-center gap-2">
-              <BellRing className="w-4 h-4 animate-bounce shrink-0" />
-              <span>{sirenMessage}</span>
+              <Volume2 className="w-4 h-4 shrink-0" />
+              <span>{voiceAnnouncementMessage}</span>
             </div>
             <button
-              onClick={handleSilenceSiren}
-              className="px-2.5 py-0.5 bg-white text-red-700 font-bold rounded hover:bg-stone-100 transition-colors cursor-pointer text-[11px]"
+              onClick={stopVoiceAnnouncement}
+              className="px-2.5 py-0.5 bg-white text-orange-700 font-bold rounded hover:bg-stone-100 transition-colors cursor-pointer text-[11px]"
             >
-              Mute Siren
+              Stop Voice
             </button>
           </div>
         )}
 
-        {/* Waiter Assistance Alert strip if any table is calling and siren is not active */}
-        {!isSirenActive && pendingCallsCount > 0 && (
+        {/* Waiter requests remain a visual panel notification; they do not play audio. */}
+        {!isVoiceAnnouncementActive && pendingCallsCount > 0 && (
           <div
             onClick={() => setActiveTab('waiter-calls')}
             className="bg-amber-500 hover:bg-amber-600 text-stone-950 px-4 py-1.5 text-xs font-black flex items-center justify-between cursor-pointer transition-colors"
@@ -219,34 +270,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-2">
-            {/* Siren Audio Test Button */}
+            {/* Kept in the original header position so the dashboard layout stays unchanged. */}
             <button
               type="button"
-              onClick={handleTestSiren}
-              className="py-1.5 px-2.5 rounded-lg bg-red-950/80 hover:bg-red-900 border border-red-800 text-red-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
-              title="Test Loud Siren Sound"
+              onClick={handleTestVoice}
+              className="py-1.5 px-2.5 rounded-lg bg-orange-950/80 hover:bg-orange-900 border border-orange-800 text-orange-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+              title="Test AI order voice"
             >
-              <BellRing className="w-3.5 h-3.5 text-red-400" />
-              <span className="hidden md:inline">Test Loud Siren</span>
-              <span className="md:hidden">Siren</span>
+              <Volume2 className="w-3.5 h-3.5 text-orange-400" />
+              <span className="hidden md:inline">Test AI Voice</span>
+              <span className="md:hidden">Voice</span>
             </button>
 
-            {/* Sound Toggle */}
+            {/* Kept in the original header position; it now controls spoken order alerts only. */}
             <button
               type="button"
-              onClick={() => {
-                const next = !soundEnabled;
-                setSoundEnabled(next);
-                if (next) unlockAudio();
-              }}
+              onClick={() => setVoiceEnabled((enabled) => !enabled)}
               className={`p-1.5 rounded-lg border text-xs transition-colors cursor-pointer ${
-                soundEnabled
+                voiceEnabled
                   ? 'bg-orange-500/20 text-orange-400 border-orange-500/40'
                   : 'bg-stone-800 text-stone-500 border-stone-700'
               }`}
-              title={soundEnabled ? 'Order sound siren is ON' : 'Order sound siren is MUTED'}
+              title={voiceEnabled ? 'AI order voice is ON' : 'AI order voice is MUTED'}
+              aria-label={voiceEnabled ? 'Mute AI order voice' : 'Enable AI order voice'}
+              aria-pressed={voiceEnabled}
             >
-              {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+              {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
             </button>
 
             <button
@@ -353,8 +402,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 orders={orders}
                 settings={settings}
                 onRefreshOrders={() => fetchAllData(false)}
-                soundEnabled={soundEnabled}
-                onToggleSound={() => setSoundEnabled(!soundEnabled)}
+                voiceEnabled={voiceEnabled}
+                onToggleVoice={() => setVoiceEnabled((enabled) => !enabled)}
               />
             )}
 

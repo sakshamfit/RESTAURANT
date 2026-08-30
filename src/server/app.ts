@@ -514,13 +514,19 @@ export function createApp() {
 
   app.get('/api/admin/orders', requireAdminAuth, async (req, res) => {
     try {
+      // `scope=all-tables` is the read-only feed used by the hotel dashboard's
+      // AI voice. It deliberately ignores status/table filters so Table 1,
+      // Table 2, Table 3, and every later table are all included. No request to
+      // this endpoint can edit, remove, or recreate an order.
       let orders = await store.list('orders');
+      const isAllTablesFeed = getIdentifier(req.query.scope) === 'all-tables';
       const status = getIdentifier(req.query.status);
       const tableId = getIdentifier(req.query.tableId);
-      if (status) orders = orders.filter((order) => order.status === status);
-      if (tableId) orders = orders.filter((order) => order.tableId === tableId);
+      if (!isAllTablesFeed && status) orders = orders.filter((order) => order.status === status);
+      if (!isAllTablesFeed && tableId) orders = orders.filter((order) => order.tableId === tableId);
       orders.sort((a, b) => new Date(b.timeline.createdAt).getTime() - new Date(a.timeline.createdAt).getTime());
-      res.json({ orders });
+      res.set('Cache-Control', 'no-store');
+      res.json({ orders, scope: isAllTablesFeed ? 'all-tables' : undefined });
     } catch (error) {
       console.error('Admin orders error:', error);
       jsonError(res, 500, 'Failed to fetch orders from the café database.');

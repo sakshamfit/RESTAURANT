@@ -30,7 +30,7 @@ import { AdminLogin } from './components/AdminLogin';
 import { AdminDashboard } from './components/AdminDashboard';
 import { TableQRScannerModal } from './components/TableQRScannerModal';
 import { TableOrderHistoryModal } from './components/TableOrderHistoryModal';
-import { playCustomerOrderSuccessSound, sendBrowserNotification, requestNotificationPermission, unlockAudio } from './utils/audioAlerts';
+import { sendBrowserNotification, requestNotificationPermission } from './utils/browserNotifications';
 import { saveMyDeviceOrderId } from './utils/deviceOrders';
 
 export default function App() {
@@ -219,7 +219,6 @@ export default function App() {
   }) => {
     if (!table) return;
     setIsSubmittingOrder(true);
-    unlockAudio();
     requestNotificationPermission();
 
     try {
@@ -248,8 +247,8 @@ export default function App() {
         saveMyDeviceOrderId(res.order.id);
       }
 
-      // Play success audio chime & send push/browser notification
-      playCustomerOrderSuccessSound();
+      // The customer still receives a browser notification, while audible order
+      // alerts are reserved for the hotel/admin AI voice assistant.
       sendBrowserNotification(
         `${settings?.cafeName || 'Nagori Chai Point'} • Order Confirmed!`,
         `Order #${res.order.orderNumber} for ${table.name} received and sent to kitchen!`

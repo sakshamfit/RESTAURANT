@@ -3,7 +3,6 @@ import { Search, ShoppingBag, ArrowRight, UtensilsCrossed, Bell, CheckCircle2, Q
 import { Product, CafeCategory, CafeTable, CartItem, CafeSettings } from '../types';
 import { ProductCard } from './ProductCard';
 import { api } from '../services/api';
-import { unlockAudio } from '../utils/audioAlerts';
 
 interface CustomerMenuProps {
   table: CafeTable;
@@ -61,7 +60,6 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
     if (isCallingWaiter) return;
     try {
       setIsCallingWaiter(true);
-      unlockAudio();
       await api.callWaiter({
         tableToken: table.token,
         tableId: table.id,
