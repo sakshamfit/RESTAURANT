@@ -93,6 +93,22 @@ the "Update Password" screen in Admin → Café Settings instead.
 - Customer view: click any table / scan QR at
   `https://nagori-restaurent.vercel.app/order/nagori_tbl_tok_table1_9a2f7c`.
 
+## AI order voice on the hotel dashboard
+
+- New orders are read from the protected all-table feed
+  `/api/admin/orders?scope=all-tables`. It is a **GET-only** feed: it never
+  changes, removes, or recreates orders, tables, menu items, or other saved
+  data.
+- The dashboard recognizes a new immutable order ID from every active table
+  (Table 1, Table 2, Table 3, and tables added later), then says: “You have
+  received a new order from Table … Please check the order panel.”
+- The browser selects an installed feminine English voice where available. Use
+  **Test AI Voice** once after login if a browser requires a first interaction
+  before automatic speech.
+- Each spoken announcement has a hard **15-second maximum** and is queued, so
+  simultaneous table orders are announced one at a time. There are no synthetic
+  alarm tones in the app.
+
 ## Checking backend health
 
 `https://nagori-restaurent.vercel.app/api/health` reports exactly where data is

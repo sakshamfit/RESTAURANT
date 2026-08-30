@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Clock, ChefHat, CheckCircle2, AlertCircle, ArrowLeft, RefreshCw, Sparkles, Receipt, Bell } from 'lucide-react';
 import { Order, OrderStatus, CafeSettings } from '../types';
 import { api } from '../services/api';
-import { playOrderAcceptedSound, playOrderReadySound, playCustomerOrderSuccessSound, sendBrowserNotification, unlockAudio } from '../utils/audioAlerts';
+import { sendBrowserNotification } from '../utils/browserNotifications';
 import { CustomerFeedbackCard } from './CustomerFeedbackCard';
 
 interface OrderStatusTrackerProps {
@@ -59,23 +59,19 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
   useEffect(() => {
     if (order) {
       if (prevStatusRef.current && prevStatusRef.current !== order.status) {
-        unlockAudio();
         if (order.status === 'accepted') {
-          playOrderAcceptedSound();
           sendBrowserNotification(
             `${settings.cafeName} • Kitchen Alert`,
             `Chef has ACCEPTED your order #${order.orderNumber}! Food is being prepared.`
           );
           setStatusBanner('👨‍🍳 Chef Accepted Your Order: Now Cooking in Kitchen!');
         } else if (order.status === 'ready') {
-          playOrderReadySound();
           sendBrowserNotification(
             `${settings.cafeName} • Food Ready!`,
             `Your order #${order.orderNumber} is READY and being served to ${order.tableName}!`
           );
           setStatusBanner('✨ Food is Ready! Being served to your table.');
         } else if (order.status === 'completed') {
-          playCustomerOrderSuccessSound();
           sendBrowserNotification(
             `${settings.cafeName} • Order Completed`,
             `Your order #${order.orderNumber} is completed. Enjoy your meal!`

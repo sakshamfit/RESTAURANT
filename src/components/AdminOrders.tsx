@@ -25,16 +25,16 @@ interface AdminOrdersProps {
   orders: Order[];
   settings: CafeSettings;
   onRefreshOrders: () => void;
-  soundEnabled: boolean;
-  onToggleSound: () => void;
+  voiceEnabled: boolean;
+  onToggleVoice: () => void;
 }
 
 export const AdminOrders: React.FC<AdminOrdersProps> = ({
   orders,
   settings,
   onRefreshOrders,
-  soundEnabled,
-  onToggleSound,
+  voiceEnabled,
+  onToggleVoice,
 }) => {
   const [dateFilter, setDateFilter] = useState<'today' | 'active' | 'all'>('today');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
@@ -323,18 +323,20 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
               ))}
           </select>
 
-          {/* Sound Siren Toggle */}
+          {/* AI voice toggle kept in the existing order-toolbar position. */}
           <button
-            onClick={onToggleSound}
-            title={soundEnabled ? 'Loud order siren is ON' : 'Loud order siren is MUTED'}
+            onClick={onToggleVoice}
+            title={voiceEnabled ? 'AI order voice is ON' : 'AI order voice is MUTED'}
             className={`p-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
-              soundEnabled
+              voiceEnabled
                 ? 'bg-orange-100 border-orange-300 text-orange-950'
                 : 'bg-stone-100 border-stone-200 text-stone-500'
             }`}
+            aria-label={voiceEnabled ? 'Mute AI order voice' : 'Enable AI order voice'}
+            aria-pressed={voiceEnabled}
           >
-            {soundEnabled ? <Volume2 className="w-4 h-4 text-orange-600" /> : <VolumeX className="w-4 h-4" />}
-            <span className="hidden sm:inline">{soundEnabled ? 'Siren ON' : 'Siren OFF'}</span>
+            {voiceEnabled ? <Volume2 className="w-4 h-4 text-orange-600" /> : <VolumeX className="w-4 h-4" />}
+            <span className="hidden sm:inline">{voiceEnabled ? 'AI Voice ON' : 'AI Voice OFF'}</span>
           </button>
 
           {/* Refresh Button */}
