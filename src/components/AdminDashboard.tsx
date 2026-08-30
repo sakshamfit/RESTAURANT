@@ -317,12 +317,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           {backendHealth.postgresConfigured ? (
             <>
               <span>
-                ⚠ Database is configured but NOT reachable — orders &amp; changes are saved to temporary storage and may
-                disappear. Check <code className="font-mono">DATABASE_URL</code> in Vercel.
+                ⚠{' '}
+                {backendHealth.postgres?.error?.code === '28P01'
+                  ? 'Database password rejected'
+                  : 'Database is configured but NOT reachable'}{' '}
+                — orders &amp; changes are saved to temporary storage and may disappear until this is fixed.
               </span>
+              {backendHealth.postgres?.error?.hint && (
+                <span className="text-[11px] font-semibold text-red-700 basis-full sm:basis-auto sm:max-w-2xl">
+                  {backendHealth.postgres.error.hint}
+                </span>
+              )}
               {backendHealth.postgres?.error?.message && (
                 <span className="text-[11px] font-mono text-red-600 truncate max-w-full">
-                  ({backendHealth.postgres.error.message})
+                  ({backendHealth.postgres.error.code ? `${backendHealth.postgres.error.code} · ` : ''}
+                  {backendHealth.postgres.error.message})
                 </span>
               )}
             </>

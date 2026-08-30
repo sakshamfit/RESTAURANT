@@ -27,7 +27,7 @@ export interface BackendHealth {
   postgres?: {
     host: string;
     status: 'connected' | 'unavailable' | 'not-configured';
-    error: { message: string; code?: string; phase: string; at: string } | null;
+    error: { message: string; code?: string; phase: string; at: string; hint?: string } | null;
     recoveryAttempts: number;
     lastProbeAt: string | null;
   };
