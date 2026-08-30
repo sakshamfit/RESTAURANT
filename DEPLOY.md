@@ -3,6 +3,29 @@
 The app is fully self-contained: React frontend + Express API + local JSON data.
 No Firebase, no Supabase, no paid services.
 
+## Live site not working? — 2-minute triage
+
+Open **`https://nagori-restaurent.vercel.app/api/health`** and read one field:
+
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| `"persistence": "postgres"` + `"status": "connected"` | Backend **and** database are fine. | Hard-refresh the site (Ctrl/Cmd+Shift+R). If a page still misbehaves, note the exact URL + action and check the Vercel logs (below). |
+| `"postgresConfigured": true` + `"status": "unavailable"` | `DATABASE_URL` is set but the database refused/failed. Read `postgres.error.message` + `hint`. | Most common cause by far: the **free Supabase project auto-paused** after inactivity → open **supabase.com → your project → Restore**; the app reconnects by itself within a minute. Wrong/rotated password → re-copy the connection string (table below). |
+| `"persistence": "file"` + `"postgresConfigured": false` | `DATABASE_URL` is **not set** in this deployment's environment. | Vercel → Project → Settings → Environment Variables → add `DATABASE_URL` (and `ADMIN_PASSWORD`) → **Redeploy**. |
+
+Other quick checks:
+
+- **Vercel runtime logs** (the real crash evidence): Vercel → Project →
+  **Deployments** → latest → **Functions/Runtime Logs**. Red bars show the exact
+  error (e.g. `FUNCTION_INVOCATION_FAILED`, timeout, a stack trace).
+- **Changed env vars?** They only apply to **new** deployments — always click
+  **Redeploy** afterwards.
+- **Old tab open?** A stale tab keeps calling old assets; hard-refresh first.
+- The backend already survives transient failures on its own: pooled database
+  connections killed by a freeze/eviction are retried on a fresh connection,
+  cold-start 503s and dropped requests are retried by the client, and
+  "Place Order" carries an idempotency key so a retry can never double-order.
+
 ## One-time setup
 
 1. Push this repo to GitHub (already done).

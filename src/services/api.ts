@@ -11,6 +11,95 @@ import {
 
 const API_BASE = '/api';
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+type FetchWithRetryInit = RequestInit & {
+  /** Delay before a mutation's single retry (placeOrder needs > 3s to clear the backend per-IP throttle). */
+  retryDelayMs?: number;
+};
+
+function newClientRequestId(): string {
+  try {
+    return `ordreq-${crypto.randomUUID()}`;
+  } catch {
+    return `ordreq-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+/**
+ * fetch() with automatic recovery from transient backend failures — the
+ * reality of a serverless deployment. A cold Vercel instance answers 503 for
+ * a moment while it boots, infrastructure hiccups surface as 500/502/504
+ * with an HTML body, and mobile networks drop connections mid-request.
+ *
+ * - Reads (GET) are always safe to retry: up to 3 attempts.
+ * - Mutations are retried at most once, and only on infrastructure-style
+ *   failures: a network error before a response, an HTML 5xx from the
+ *   platform, or the backend's own "backend is still starting up" 503.
+ *   A JSON business error from the app (400/401/404/500-with-error-body)
+ *   is never retried — the caller sees it immediately.
+ * - Place Order sends a clientRequestId so the backend replays the first
+ *   result instead of creating a duplicate when a retry is needed.
+ */
+async function fetchWithRetry(url: string, init: FetchWithRetryInit = {}): Promise<Response> {
+  const { retryDelayMs, ...fetchInit } = init;
+  const method = (fetchInit.method || 'GET').toUpperCase();
+  const isRead = method === 'GET';
+  const maxAttempts = isRead ? 3 : 2;
+  const mutationRetryDelay = retryDelayMs ?? 1200;
+  let lastResponse: Response | null = null;
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let response: Response | null = null;
+    let networkError: unknown = null;
+    const canRetryMore = attempt < maxAttempts;
+
+    try {
+      response = await fetch(url, fetchInit);
+    } catch (error) {
+      // Network-level failure: no response at all (cold-start blip, dropped
+      // mobile connection, DNS hiccup).
+      networkError = error;
+    }
+
+    if (networkError !== null) {
+      lastError = networkError;
+      lastResponse = null;
+      if (canRetryMore) {
+        await sleep(attempt === 1 ? (isRead ? 800 : mutationRetryDelay) : 2000);
+        continue;
+      }
+      throw networkError;
+    }
+
+    lastResponse = response;
+    lastError = null;
+
+    const isServerHiccup = response!.status >= 500 && response!.status <= 504;
+    if (!isServerHiccup) return response!;
+    if (!canRetryMore) return response!;
+
+    if (isRead) {
+      await sleep(attempt === 1 ? 800 : 2000);
+      continue;
+    }
+
+    // Mutations: retry only infrastructure failures — an HTML 5xx from the
+    // platform or the backend's own "still starting up" 503. A JSON error
+    // body produced by the app itself is surfaced immediately.
+    const contentType = response!.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      const bodyText = await response!.clone().text().catch(() => '');
+      if (!/starting up/i.test(bodyText)) return response!;
+    }
+    await sleep(mutationRetryDelay);
+  }
+
+  if (lastError) throw lastError;
+  return lastResponse as Response;
+}
+
 function getAuthHeader() {
   const token = localStorage.getItem('nagori_admin_token');
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -33,13 +122,17 @@ export interface BackendHealth {
   };
   dataFile?: string;
   ephemeral?: boolean;
+  /** Process uptime — near-zero on every check means requests keep cold-starting. */
+  nodeUptimeSeconds?: number;
+  /** Vercel region that served the request (e.g. "iad1"), when deployed there. */
+  region?: string | null;
   timestamp: string;
 }
 
 export const api = {
   // Backend health & diagnostics
   async getHealth(): Promise<BackendHealth> {
-    const res = await fetch(`${API_BASE}/health`, { cache: 'no-store' });
+    const res = await fetchWithRetry(`${API_BASE}/health`, { cache: 'no-store' });
     if (!res.ok) {
       throw new Error('Backend health check failed.');
     }
@@ -48,7 +141,7 @@ export const api = {
 
   // Public Customer APIs
   async getPublicTables(): Promise<{ tables: CafeTable[] }> {
-    const res = await fetch(`${API_BASE}/public/tables`);
+    const res = await fetchWithRetry(`${API_BASE}/public/tables`);
     if (!res.ok) {
       throw new Error('Failed to load tables list.');
     }
@@ -61,7 +154,7 @@ export const api = {
     categories: CafeCategory[];
     products: Product[];
   }> {
-    const res = await fetch(`${API_BASE}/table/${encodeURIComponent(token)}`);
+    const res = await fetchWithRetry(`${API_BASE}/table/${encodeURIComponent(token)}`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Failed to load table menu.');
@@ -73,7 +166,7 @@ export const api = {
     table: CafeTable;
     orders: Order[];
   }> {
-    const res = await fetch(`${API_BASE}/table/${encodeURIComponent(token)}/orders`);
+    const res = await fetchWithRetry(`${API_BASE}/table/${encodeURIComponent(token)}/orders`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Failed to load table order history.');
@@ -92,10 +185,17 @@ export const api = {
       quantity: number;
     }[];
   }): Promise<{ success: boolean; order: Order; message: string }> {
-    const res = await fetch(`${API_BASE}/orders`, {
+    // One id per cart submission: every automatic retry of THIS call carries
+    // the same id, and the backend replays the first result — a flaky network
+    // can never silently double-place the order.
+    const clientRequestId = newClientRequestId();
+    const res = await fetchWithRetry(`${API_BASE}/orders`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, clientRequestId }),
+      // The backend throttles submissions to one per IP every 3s; retrying
+      // sooner would bounce off with 429 instead of succeeding.
+      retryDelayMs: 3500,
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -106,7 +206,7 @@ export const api = {
   },
 
   async trackOrder(orderId: string): Promise<{ order: Order }> {
-    const res = await fetch(`${API_BASE}/orders/track/${encodeURIComponent(orderId)}`);
+    const res = await fetchWithRetry(`${API_BASE}/orders/track/${encodeURIComponent(orderId)}`);
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Order not found.');
@@ -121,7 +221,7 @@ export const api = {
     tableName: string;
     customerName?: string;
   }): Promise<{ success: boolean; call: any; message: string }> {
-    const res = await fetch(`${API_BASE}/waiter-call`, {
+    const res = await fetchWithRetry(`${API_BASE}/waiter-call`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -143,7 +243,7 @@ export const api = {
     rating: number;
     comment: string;
   }): Promise<{ success: boolean; feedback: any; message: string }> {
-    const res = await fetch(`${API_BASE}/feedback`, {
+    const res = await fetchWithRetry(`${API_BASE}/feedback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -158,7 +258,7 @@ export const api = {
 
   // Admin Waiter Calls & Feedbacks
   async adminGetWaiterCalls(): Promise<{ calls: any[] }> {
-    const res = await fetch(`${API_BASE}/admin/waiter-calls`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/waiter-calls`, {
       headers: { ...getAuthHeader() },
     });
     if (!res.ok) throw new Error('Failed to load waiter calls.');
@@ -166,7 +266,7 @@ export const api = {
   },
 
   async adminAttendWaiterCall(id: string): Promise<{ success: boolean; call: any }> {
-    const res = await fetch(`${API_BASE}/admin/waiter-calls/${encodeURIComponent(id)}/attend`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/waiter-calls/${encodeURIComponent(id)}/attend`, {
       method: 'PATCH',
       headers: { ...getAuthHeader() },
     });
@@ -181,7 +281,7 @@ export const api = {
     totalFeedbacks: number;
     ratingDistribution: Record<number, number>;
   }> {
-    const res = await fetch(`${API_BASE}/admin/feedbacks`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/feedbacks`, {
       headers: { ...getAuthHeader() },
     });
     if (!res.ok) throw new Error('Failed to load feedbacks.');
@@ -192,7 +292,7 @@ export const api = {
   async adminLogin(email: string, password: string): Promise<{ success: boolean; token: string }> {
     let res: Response;
     try {
-      res = await fetch(`${API_BASE}/admin/login`, {
+      res = await fetchWithRetry(`${API_BASE}/admin/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
@@ -216,7 +316,7 @@ export const api = {
   },
 
   async adminGetMe(): Promise<{ email: string; cafeName: string }> {
-    const res = await fetch(`${API_BASE}/admin/me`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/me`, {
       headers: { ...getAuthHeader() },
     });
     if (!res.ok) {
@@ -227,7 +327,7 @@ export const api = {
 
   async adminLogout(): Promise<void> {
     try {
-      await fetch(`${API_BASE}/admin/logout`, {
+      await fetchWithRetry(`${API_BASE}/admin/logout`, {
         method: 'POST',
         headers: { ...getAuthHeader() },
       });
@@ -243,7 +343,7 @@ export const api = {
     if (status) params.append('status', status);
     if (tableId) params.append('tableId', tableId);
 
-    const res = await fetch(`${API_BASE}/admin/orders?${params.toString()}`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/orders?${params.toString()}`, {
       headers: { ...getAuthHeader() },
     });
     if (!res.ok) {
@@ -258,7 +358,7 @@ export const api = {
     status: OrderStatus,
     cancellationReason?: string
   ): Promise<{ success: boolean; order: Order }> {
-    const res = await fetch(`${API_BASE}/admin/orders/${orderId}/status`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/orders/${orderId}/status`, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
@@ -278,7 +378,7 @@ export const api = {
     orderId: string,
     paymentStatus: PaymentStatus
   ): Promise<{ success: boolean; order: Order }> {
-    const res = await fetch(`${API_BASE}/admin/orders/${orderId}/payment`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/orders/${orderId}/payment`, {
       method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
@@ -296,7 +396,7 @@ export const api = {
 
   // Admin Products
   async adminGetProducts(): Promise<{ products: Product[] }> {
-    const res = await fetch(`${API_BASE}/admin/products`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/products`, {
       headers: { ...getAuthHeader() },
     });
     if (!res.ok) {
@@ -307,7 +407,7 @@ export const api = {
   },
 
   async adminAddProduct(product: Partial<Product>): Promise<{ success: boolean; product: Product }> {
-    const res = await fetch(`${API_BASE}/admin/products`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/products`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -323,7 +423,7 @@ export const api = {
   },
 
   async adminEditProduct(id: string, product: Partial<Product>): Promise<{ success: boolean; product: Product }> {
-    const res = await fetch(`${API_BASE}/admin/products/${id}`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/products/${id}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -339,7 +439,7 @@ export const api = {
   },
 
   async adminToggleProductAvailability(id: string): Promise<{ success: boolean; product: Product }> {
-    const res = await fetch(`${API_BASE}/admin/products/${id}/availability`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/products/${id}/availability`, {
       method: 'PATCH',
       headers: { ...getAuthHeader() },
     });
@@ -351,7 +451,7 @@ export const api = {
   },
 
   async adminDeleteProduct(id: string): Promise<{ success: boolean }> {
-    const res = await fetch(`${API_BASE}/admin/products/${id}`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/products/${id}`, {
       method: 'DELETE',
       headers: { ...getAuthHeader() },
     });
@@ -364,7 +464,7 @@ export const api = {
 
   // Admin Tables
   async adminGetTables(): Promise<{ tables: (CafeTable & { activeOrder?: Order | null })[] }> {
-    const res = await fetch(`${API_BASE}/admin/tables`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/tables`, {
       headers: { ...getAuthHeader() },
     });
     if (!res.ok) {
@@ -375,7 +475,7 @@ export const api = {
   },
 
   async adminAddTable(tableNumber: number, name?: string): Promise<{ success: boolean; table: CafeTable }> {
-    const res = await fetch(`${API_BASE}/admin/tables`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/tables`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -391,7 +491,7 @@ export const api = {
   },
 
   async adminToggleTable(id: string): Promise<{ success: boolean; table: CafeTable }> {
-    const res = await fetch(`${API_BASE}/admin/tables/${id}/toggle`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/tables/${id}/toggle`, {
       method: 'PATCH',
       headers: { ...getAuthHeader() },
     });
@@ -403,7 +503,7 @@ export const api = {
   },
 
   async adminRegenerateToken(id: string): Promise<{ success: boolean; table: CafeTable }> {
-    const res = await fetch(`${API_BASE}/admin/tables/${id}/regenerate-token`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/tables/${id}/regenerate-token`, {
       method: 'PATCH',
       headers: { ...getAuthHeader() },
     });
@@ -415,7 +515,7 @@ export const api = {
   },
 
   async adminDeleteTable(id: string): Promise<{ success: boolean }> {
-    const res = await fetch(`${API_BASE}/admin/tables/${id}`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/tables/${id}`, {
       method: 'DELETE',
       headers: { ...getAuthHeader() },
     });
@@ -428,7 +528,7 @@ export const api = {
 
   // Admin Categories
   async adminGetCategories(): Promise<{ categories: CafeCategory[] }> {
-    const res = await fetch(`${API_BASE}/admin/categories`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/categories`, {
       headers: { ...getAuthHeader() },
     });
     if (!res.ok) throw new Error('Failed to fetch categories.');
@@ -436,7 +536,7 @@ export const api = {
   },
 
   async adminAddCategory(name: string): Promise<{ success: boolean; category: CafeCategory }> {
-    const res = await fetch(`${API_BASE}/admin/categories`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/categories`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -449,7 +549,7 @@ export const api = {
   },
 
   async adminEditCategory(id: string, name: string): Promise<{ success: boolean; category: CafeCategory; updatedProductsCount?: number }> {
-    const res = await fetch(`${API_BASE}/admin/categories/${encodeURIComponent(id)}`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/categories/${encodeURIComponent(id)}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -465,7 +565,7 @@ export const api = {
   },
 
   async adminDeleteCategory(id: string): Promise<{ success: boolean }> {
-    const res = await fetch(`${API_BASE}/admin/categories/${id}`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/categories/${id}`, {
       method: 'DELETE',
       headers: { ...getAuthHeader() },
     });
@@ -479,7 +579,7 @@ export const api = {
     if (startDate) params.append('startDate', startDate);
     if (endDate) params.append('endDate', endDate);
 
-    const res = await fetch(`${API_BASE}/admin/reports?${params.toString()}`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/reports?${params.toString()}`, {
       headers: { ...getAuthHeader() },
     });
     if (!res.ok) {
@@ -491,7 +591,7 @@ export const api = {
 
   // Admin Settings
   async adminGetSettings(): Promise<{ settings: CafeSettings; adminEmail: string }> {
-    const res = await fetch(`${API_BASE}/admin/settings`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/settings`, {
       headers: { ...getAuthHeader() },
     });
     if (!res.ok) throw new Error('Failed to load settings.');
@@ -499,7 +599,7 @@ export const api = {
   },
 
   async adminUpdateSettings(settings: Partial<CafeSettings>): Promise<{ success: boolean; settings: CafeSettings }> {
-    const res = await fetch(`${API_BASE}/admin/settings`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/settings`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -512,7 +612,7 @@ export const api = {
   },
 
   async adminChangePassword(currentPassword: string, newPassword: string): Promise<{ success: boolean; message: string }> {
-    const res = await fetch(`${API_BASE}/admin/change-password`, {
+    const res = await fetchWithRetry(`${API_BASE}/admin/change-password`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

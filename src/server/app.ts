@@ -44,6 +44,26 @@ const ORDER_THROTTLE_MS = 3000;
 // and flapping the longer it runs. Expired entries are swept and the size capped.
 const MAX_TRACKED_CLIENTS = 1000;
 
+// Idempotency window for order submissions. The customer client attaches a
+// random clientRequestId to every "Place Order" press and keeps it across
+// automatic retries, so a retry after a dropped response can never create a
+// second order — the server replays the first result instead.
+const ORDER_IDEMPOTENCY_TTL_MS = 10 * 60 * 1000;
+const recentOrderRequests = new Map<string, { order: Order; at: number }>();
+
+function rememberRecentOrderRequest(key: string, order: Order) {
+  const nowMs = Date.now();
+  if (recentOrderRequests.size >= MAX_TRACKED_CLIENTS) {
+    for (const [k, v] of recentOrderRequests) {
+      if (nowMs - v.at > ORDER_IDEMPOTENCY_TTL_MS) recentOrderRequests.delete(k);
+    }
+  }
+  if (recentOrderRequests.size >= MAX_TRACKED_CLIENTS) {
+    dropOldest(recentOrderRequests, Math.ceil(MAX_TRACKED_CLIENTS / 2));
+  }
+  recentOrderRequests.set(key, { order, at: nowMs });
+}
+
 function dropOldest(map: Map<string, unknown>, count: number) {
   let remaining = count;
   for (const key of map.keys()) {
@@ -246,6 +266,11 @@ export function createApp() {
         : undefined,
       dataFile: diagnostics.dataFile,
       ephemeral: diagnostics.ephemeral,
+      // Ops helpers: a very low uptime together with "connected" on every check
+      // means requests keep landing on fresh cold starts; VERCEL_REGION shows
+      // which datacenter served the request.
+      nodeUptimeSeconds: Math.round(process.uptime()),
+      region: process.env.VERCEL_REGION || null,
       timestamp: new Date().toISOString(),
     });
   });
@@ -303,15 +328,27 @@ export function createApp() {
   app.post('/api/orders', async (req, res) => {
     try {
       const ip = req.ip || req.socket.remoteAddress || 'unknown';
+      const { tableToken, tableId, tableNumber, tableName, customerName, customerPhone, specialInstructions, items, clientRequestId } = req.body || {};
+      if (!customerName || typeof customerName !== 'string' || !customerName.trim()) return jsonError(res, 400, 'Customer name is required.');
+
+      // Idempotent submission FIRST: if this exact request (same
+      // clientRequestId) was already processed, replay the original result
+      // instead of creating a duplicate order — regardless of timing, so an
+      // automatic retry is never bounced by the per-IP throttle below.
+      const idempotencyKey = typeof clientRequestId === 'string' ? clientRequestId.trim().slice(0, 64) : '';
+      if (idempotencyKey) {
+        const previous = recentOrderRequests.get(idempotencyKey);
+        if (previous && Date.now() - previous.at <= ORDER_IDEMPOTENCY_TTL_MS) {
+          return res.status(200).json({ success: true, order: previous.order, duplicate: true, message: 'Order already placed.' });
+        }
+      }
+
       const now = Date.now();
       const lastOrderTime = clientOrderTimestamps.get(ip) || 0;
       if (now - lastOrderTime < ORDER_THROTTLE_MS) {
         return jsonError(res, 429, 'Order submission in progress. Please wait a few seconds.');
       }
       rememberOrderAttempt(ip, now);
-
-      const { tableToken, tableId, tableNumber, tableName, customerName, customerPhone, specialInstructions, items } = req.body || {};
-      if (!customerName || typeof customerName !== 'string' || !customerName.trim()) return jsonError(res, 400, 'Customer name is required.');
 
       const snapshot = await store.snapshot();
       const table = findTable(snapshot.tables, tableToken) || findTable(snapshot.tables, tableId) || findTable(snapshot.tables, tableNumber);
@@ -367,6 +404,7 @@ export function createApp() {
       order.whatsappNotificationSent = whatsappResult.success;
       if (whatsappResult.error) order.whatsappNotificationError = whatsappResult.error;
       await store.put('orders', order);
+      if (idempotencyKey) rememberRecentOrderRequest(idempotencyKey, order);
       res.status(201).json({ success: true, order, message: 'Order placed successfully!' });
     } catch (error: any) {
       console.error('Order creation error:', error);

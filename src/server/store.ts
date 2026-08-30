@@ -171,6 +171,9 @@ export function pgErrorHint(error: { code?: string; message: string }, host: str
   if (code === '3D000') {
     return `The database named in DATABASE_URL does not exist (or was renamed/deleted). Check the database name in the connection string and that the project is still running.`;
   }
+  if (code === '53300' || /too many clients|too many connections/i.test(message)) {
+    return `The database hit its connection limit (free tiers cap total connections across all serverless instances). The backend now keeps at most 5 connections per instance and retries automatically — if this keeps happening, use your provider's pooled connection string (e.g. Supabase Session pooler, port 6543) as DATABASE_URL and redeploy.`;
+  }
   if (code === '57P03' || /starting up|crash|recovery/i.test(message)) {
     return `The database is asleep or starting up (free ${provider} projects pause when idle). The backend retries automatically and will connect as soon as it wakes.`;
   }
@@ -271,13 +274,27 @@ function pgClientOptions(extra?: PgOptions): PgOptions {
     family: PG_FAMILY,
     stream: ipv4SocketFactory(),
     connectionTimeoutMillis: PG_TIMEOUT_MS,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 5000,
   };
   if (pgSslResolved === 'tls') base.ssl = { rejectUnauthorized: false };
   return { ...base, ...extra };
 }
 
 function pgPoolOptions(): PgOptions {
-  return pgClientOptions({ max: 10 });
+  // max 5: every warm Vercel instance holds its own pool against the same
+  // Supabase project, and free tiers cap total connections per user. Ten per
+  // instance used to exhaust the provider's limit as instances scaled out,
+  // which surfaced as random "sorry, too many clients already" 500s.
+  // idleTimeoutMillis: aggressively drop connections this process no longer
+  // needs — a serverless instance can be frozen at any moment and the provider
+  // silently kills long-idle sockets anyway.
+  return pgClientOptions({
+    max: 5,
+    idleTimeoutMillis: 30_000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 5000,
+  });
 }
 
 async function getPool(): Promise<any> {
@@ -290,6 +307,59 @@ async function getPool(): Promise<any> {
     });
   }
   return pgPool;
+}
+
+/**
+ * Errors that mean "the pooled socket died mid-flight or the database hiccupped",
+ * not "the query is wrong". A Vercel lambda frozen mid-idle wakes up with stale
+ * sockets (the provider closed them while the process was suspended), poolers
+ * evict idle connections, and brief network blips happen — all of these reject
+ * exactly one query and are fine a moment later. Every statement this module
+ * runs is an idempotent read or upsert (and the order counter is deliberately
+ * retried too: a momentarily skipped number is better than a failed order), so
+ * re-running the failed statement on a fresh connection is safe.
+ */
+function isTransientPgError(error: any): boolean {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '');
+  return (
+    ['ECONNRESET', 'EPIPE', 'ECONNABORTED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'ECONNREFUSED'].includes(code) ||
+    ['57P03', '53300', '08000', '08003', '08006', '08001', '08004', 'XX000'].includes(code) ||
+    /connection terminated|server closed the connection|terminating connection|socket hang up|SSL SYSCALL|too many clients|connection error|database system is starting up/i.test(
+      message
+    )
+  );
+}
+
+let lastTransientLogAt = 0;
+
+/**
+ * Runs one statement against the pool, retrying transient connection failures
+ * on a fresh pooled client. Non-transient errors (bad SQL, constraint
+ * violations, auth failures) propagate immediately — no wasted roundtrips.
+ */
+async function queryWithRetry(sql: string, params?: unknown[]): Promise<{ rows: any[] }> {
+  const pool = await getPool();
+  let lastError: any;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await pool.query(sql, params);
+    } catch (error) {
+      lastError = error;
+      if (attempt === 3 || !isTransientPgError(error)) break;
+      const delay = 250 * 2 ** (attempt - 1); // 250ms, then 500ms
+      const nowMs = Date.now();
+      if (nowMs - lastTransientLogAt > 5000) {
+        // Rate-limited so a flapping database doesn't flood the logs.
+        lastTransientLogAt = nowMs;
+        console.warn(
+          `[store] Transient Postgres error (${(error as Error)?.message || error}); retrying in ${delay}ms (attempt ${attempt + 1}/3).`
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  throw lastError;
 }
 
 function pgTableName(collection: StoreCollection) {
@@ -640,11 +710,10 @@ export class RestaurantStore {
 
   private async ensurePostgresSchema() {
     this.pgPhase = 'connect';
-    const pool = await getPool();
-    this.pgPhase = 'schema-check';
-    const { rows } = await pool.query(
+    const { rows } = await queryWithRetry(
       `select to_regclass('public.app_settings') as settings, to_regclass('public.app_counters') as counters`
     );
+    this.pgPhase = 'schema-check';
     if (rows[0]?.settings && rows[0]?.counters) return;
 
     const schemaPath = path.join(process.cwd(), 'db', 'schema.sql');
@@ -675,7 +744,7 @@ export class RestaurantStore {
       await client.end();
     }
 
-    const check = await pool.query(`select to_regclass('public.app_settings') as settings`);
+    const check = await queryWithRetry(`select to_regclass('public.app_settings') as settings`);
     if (!check.rows[0]?.settings) {
       throw new Error('Database schema is still missing after running db/schema.sql.');
     }
@@ -690,7 +759,7 @@ export class RestaurantStore {
   private async raisePgCounterToLocalMax() {
     try {
       const localMax = this.memory.counters.orders || 0;
-      await (await getPool()).query(
+      await queryWithRetry(
         `update app_counters set value = greatest(value, $1) where id = 'orders'`,
         [localMax]
       );
@@ -721,7 +790,6 @@ export class RestaurantStore {
    * carried over, so this is safe to run on every (re)connect.
    */
   private async migrateLocalRecordsToPostgres() {
-    const pool = await getPool();
     const collections: StoreCollection[] = ['categories', 'tables', 'products', 'orders', 'feedbacks', 'waiterCalls'];
     let migrated = 0;
     for (const collection of collections) {
@@ -732,7 +800,7 @@ export class RestaurantStore {
         if (!record || !record.id) continue;
         const timestamp = record.createdAt || now();
         try {
-          await pool.query(
+          await queryWithRetry(
             `insert into "${table}" (id, data, created_at, updated_at)
              values ($1, $2::jsonb, $3, $3)
              on conflict (id) do nothing`,
@@ -748,7 +816,7 @@ export class RestaurantStore {
     const localSettings = this.memory.settings;
     if (localSettings) {
       try {
-        await pool.query(
+        await queryWithRetry(
           `insert into app_settings (id, data, updated_at)
            values ('config', $1::jsonb, $2)
            on conflict (id) do nothing`,
@@ -769,14 +837,14 @@ export class RestaurantStore {
 
   private async ensureCounter() {
     if (!this.usePostgres) return;
-    await (await getPool()).query(
+    await queryWithRetry(
       `insert into app_counters (id, value) values ('orders', 1040) on conflict (id) do nothing`
     );
   }
 
   private async listInternal<C extends StoreCollection>(collection: C): Promise<CollectionModel[C][]> {
     if (this.usePostgres) {
-      const { rows } = await (await getPool()).query(
+      const { rows } = await queryWithRetry(
         `select id, data from "${pgTableName(collection)}" order by created_at desc`
       );
       return (rows as Array<{ id: string; data: CollectionModel[C] }>).map((row) => ({
@@ -790,7 +858,7 @@ export class RestaurantStore {
 
   private async getInternal<C extends StoreCollection>(collection: C, id: string): Promise<CollectionModel[C] | null> {
     if (this.usePostgres) {
-      const { rows } = await (await getPool()).query(
+      const { rows } = await queryWithRetry(
         `select id, data from "${pgTableName(collection)}" where id = $1 limit 1`,
         [id]
       );
@@ -806,7 +874,7 @@ export class RestaurantStore {
     const value = { ...clone(record), id };
     if (this.usePostgres) {
       const timestamp = now();
-      await (await getPool()).query(
+      await queryWithRetry(
         `insert into "${pgTableName(collection)}" (id, data, created_at, updated_at)
          values ($1, $2::jsonb, $3, $3)
          on conflict (id) do update set data = excluded.data, updated_at = excluded.updated_at`,
@@ -841,7 +909,7 @@ export class RestaurantStore {
   async remove(collection: StoreCollection, id: string) {
     await this.ensureReady();
     if (this.usePostgres) {
-      await (await getPool()).query(`delete from "${pgTableName(collection)}" where id = $1`, [id]);
+      await queryWithRetry(`delete from "${pgTableName(collection)}" where id = $1`, [id]);
       return;
     }
     this.memory[collection] = (this.memory[collection] as unknown as Array<{ id: string }>).filter((item) => item.id !== id) as never;
@@ -855,7 +923,7 @@ export class RestaurantStore {
 
   private async getSettingsInternal(): Promise<CafeSettings | null> {
     if (this.usePostgres) {
-      const { rows } = await (await getPool()).query(`select data from app_settings where id = 'config' limit 1`);
+      const { rows } = await queryWithRetry(`select data from app_settings where id = 'config' limit 1`);
       return rows[0] ? clone(rows[0].data as CafeSettings) : null;
     }
     return clone(this.memory.settings);
@@ -864,7 +932,7 @@ export class RestaurantStore {
   private async putSettingsInternal(settings: CafeSettings): Promise<CafeSettings> {
     if (this.usePostgres) {
       const timestamp = now();
-      await (await getPool()).query(
+      await queryWithRetry(
         `insert into app_settings (id, data, updated_at)
          values ('config', $1::jsonb, $2)
          on conflict (id) do update set data = excluded.data, updated_at = excluded.updated_at`,
@@ -900,7 +968,7 @@ export class RestaurantStore {
     await this.ensureReady();
     if (this.usePostgres) {
       try {
-        const { rows } = await (await getPool()).query(`select next_order_number() as value`);
+        const { rows } = await queryWithRetry(`select next_order_number() as value`);
         return Number(rows[0]?.value);
       } catch (error) {
         throw new Error(`Postgres order counter is unavailable. Run db/schema.sql: ${(error as Error).message}`);
