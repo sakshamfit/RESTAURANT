@@ -25,6 +25,26 @@ function pgUrlSafe() {
 async function startServer() {
   await initAdminAuth();
   await store.waitUntilReady();
+
+  // A dead database must be impossible to miss at start-up. Nothing exits here
+  // on purpose (the background recovery can still heal a paused database), but
+  // the operator gets the reason and the fix in the first lines of output.
+  const diagnostics = store.getDiagnostics();
+  if (diagnostics.failingLoudly) {
+    console.error(
+      `\n*** DATABASE UNAVAILABLE — the server is starting, but every data request will return 503. ***\n` +
+        `    host:  ${diagnostics.postgresHost || '(DATABASE_URL not configured)'}\n` +
+        `    error: ${diagnostics.postgresError?.message || 'unknown error'}\n` +
+        `    fix:   ${diagnostics.postgresError?.hint || 'Set DATABASE_URL correctly and restart.'}\n`
+    );
+  }
+  if (diagnostics.localFileFallbackActive) {
+    console.error(
+      `\n*** DATABASE UNAVAILABLE — falling back to the local file ${diagnostics.dataFile} (development only). ***\n` +
+        `    error: ${diagnostics.postgresError?.message || 'unknown error'}\n` +
+        `    fix:   ${diagnostics.postgresError?.hint || 'Check DATABASE_URL.'}\n`
+    );
+  }
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: {

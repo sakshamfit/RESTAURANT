@@ -29,6 +29,20 @@ export type PostgresPhase =
 /** Non-secret diagnostics about the store, exposed by the health endpoint. */
 export interface StoreDiagnostics {
   provider: StoreProvider;
+  /** How this process is allowed to store data (see `storageMode`). */
+  storageMode: StorageMode;
+  /** True when the local JSON file is forbidden and Postgres is mandatory. */
+  postgresRequired: boolean;
+  /**
+   * True when Postgres is required and currently unreachable: every read and
+   * write is failing with 503 rather than quietly using the local file.
+   */
+  failingLoudly: boolean;
+  /**
+   * True when DATABASE_URL is set, the database is down, and the app is
+   * serving data from the local file anyway (development-only fallback).
+   */
+  localFileFallbackActive: boolean;
   postgresConfigured: boolean;
   /** Hostname only — never credentials. */
   postgresHost: string;
@@ -125,6 +139,96 @@ function normalizeConnectionString(name: string, rawValue: string): string {
 const pgUrl = normalizeConnectionString('DATABASE_URL', process.env.DATABASE_URL || '');
 const pgDirectUrl = normalizeConnectionString('DIRECT_URL', process.env.DIRECT_URL || '') || pgUrl;
 export const postgresConfigured = Boolean(pgUrl);
+
+/**
+ * True when this process is a deployed/serverless instance (`VERCEL`) or is
+ * explicitly running as production.
+ *
+ * This matters because a local JSON file is *not* a fallback on these
+ * platforms, it is a data-loss bug: every serverless instance gets its own
+ * private `/tmp`, so a "saved" order is visible to whichever instance happened
+ * to answer the next request and is gone on the next cold start. That is
+ * exactly the "my menu items and orders keep disappearing and reappearing"
+ * symptom. So the default flips from "keep running on a file" to "fail loudly".
+ */
+export const isProductionRuntime = Boolean(process.env.VERCEL) || process.env.NODE_ENV === 'production';
+
+/**
+ * Should the app be allowed to serve data from the local JSON file?
+ *
+ * Default: yes for local development (where one process owns one file on a
+ * real disk and the file genuinely persists), **no in production** (where it
+ * silently produces divergent per-instance data).
+ *
+ * `ALLOW_LOCAL_FILE_FALLBACK` overrides either default. Set it to `true` to
+ * restore the old always-on behaviour, or to `false` to rehearse the
+ * production fail-loud behaviour locally.
+ */
+export const allowLocalFileFallback = (() => {
+  const raw = String(process.env.ALLOW_LOCAL_FILE_FALLBACK || '').trim().toLowerCase();
+  if (raw === 'true' || raw === '1') return true;
+  if (raw === 'false' || raw === '0') return false;
+  return !isProductionRuntime;
+})();
+
+/**
+ * How this process is allowed to store data. Decided once, at module load, and
+ * never renegotiated — a store that changes its backing source mid-flight is
+ * what made the admin panel's data appear and disappear.
+ *
+ * - `'postgres'` — Postgres is the one and only store. If it cannot be
+ *   reached the app returns 503 and saves nothing. **No local file is ever
+ *   read or written.** This is the production default.
+ * - `'postgres-with-file-fallback'` — try Postgres; if it is unreachable, fall
+ *   back to the local file, loudly (an `error`-level log plus a warning in
+ *   `/api/health` and the admin banner). Local records are copied into
+ *   Postgres when the connection heals. Local development default only.
+ * - `'file'` — local JSON file, because no `DATABASE_URL` is configured.
+ */
+export type StorageMode = 'postgres' | 'postgres-with-file-fallback' | 'file';
+
+export const storageMode: StorageMode = allowLocalFileFallback
+  ? postgresConfigured
+    ? 'postgres-with-file-fallback'
+    : 'file'
+  : 'postgres';
+
+/**
+ * True when this process must refuse to serve data rather than fall back to
+ * the local file.
+ */
+export const postgresRequired = storageMode === 'postgres';
+
+/**
+ * Thrown when Postgres is the required store and it cannot be reached.
+ *
+ * Deliberately loud: it carries the actionable `hint` (bad password? wrong
+ * host? sleeping project?) so the API can return it to the admin UI instead of
+ * serving a phantom local menu that looks like real data.
+ */
+export class PostgresUnavailableError extends Error {
+  readonly code = 'POSTGRES_UNAVAILABLE' as const;
+  readonly phase: PostgresPhase;
+  readonly pgCode: string | undefined;
+  readonly hint: string | undefined;
+  readonly postgresError: StoreDiagnostics['postgresError'];
+
+  constructor(postgresError: StoreDiagnostics['postgresError']) {
+    super(postgresError?.message || 'Postgres is unreachable.');
+    this.name = 'PostgresUnavailableError';
+    this.phase = postgresError?.phase || 'unknown';
+    this.pgCode = postgresError?.code;
+    this.hint = postgresError?.hint;
+    this.postgresError = postgresError;
+  }
+}
+
+/** Row id in `app_settings` used to remember that a database has been seeded. */
+const PG_BOOTSTRAP_MARKER = 'bootstrap';
+/** Cold-start bootstrap attempts before giving up (only transient errors retry). */
+const PG_BOOTSTRAP_ATTEMPTS = 3;
+/** A request may trigger a fresh bootstrap attempt at most this often. */
+const PG_RETRY_COALESCE_MS = 10_000;
 
 /** Validates the configured URL as early as possible (cheap, no network). */
 function pgUrlParseError(connectionString: string): string | null {
@@ -384,15 +488,31 @@ function orderNumberValue(order: Order): number {
 }
 
 /**
- * Persistence: either direct Postgres (DATABASE_URL), or a local JSON file at
- * data/restaurant.json. No Supabase, no Firebase, no other cloud services —
- * the app is fully self-contained and always starts.
+ * Persistence: direct Postgres when `DATABASE_URL` is set, otherwise a local
+ * JSON file. No Supabase, no Firebase, no other cloud services.
+ *
+ * When Postgres is configured **and** this is a production/serverless runtime,
+ * Postgres is mandatory: an unreachable database makes every data route return
+ * 503 with an actionable hint instead of silently serving a per-instance local
+ * file. See `storageMode` for the full rules.
  */
 export class RestaurantStore {
   private ready: Promise<void>;
-  private usePostgres = postgresConfigured;
+  /** Fixed for the lifetime of the process — see `storageMode`. */
+  private readonly mode: StorageMode = storageMode;
+  /**
+   * Whether the Postgres bootstrap has succeeded. Separate from `mode` so the
+   * store can never switch backing sources behind a request's back: `mode`
+   * decides *what is allowed*, this decides *what is currently reachable*.
+   */
+  private pgOnline = false;
+  /** A bootstrap attempt already running, shared by every caller (single-flight). */
+  private pgRecoveryInFlight: Promise<boolean> | null = null;
+  private pgLastProbeMs = 0;
   private memory: DataFile;
   private ephemeral = false;
+  /** True when the local data file already existed on disk at start-up. */
+  private localFileExisted = false;
   /** Serializes disk writes: at most one write is in flight, the rest coalesce. */
   private writeQueue: Promise<void> = Promise.resolve();
   private inFlightWrite: Promise<void> | null = null;
@@ -410,8 +530,25 @@ export class RestaurantStore {
   private pgLastProbeAt: string | null = null;
 
   constructor() {
-    this.memory = this.loadOrCreateDataFileSync();
+    // The local file is loaded lazily, only if it is actually going to back
+    // the store. Reading (or worse, creating) `restaurant.json` while Postgres
+    // is the real store would give the admin panel a phantom menu to display
+    // during an outage — which looks exactly like "my data disappeared".
+    this.memory = { ...createMemorySnapshot(), counters: { orders: 1040 } };
     this.ready = this.initialize();
+  }
+
+  /**
+   * Which store serves reads and writes right now.
+   *
+   * In `'postgres'` mode this is *always* true — even while the database is
+   * down. That is the point: unavailability is reported as a 503, it is never
+   * papered over by switching to a different data source.
+   */
+  private get usePostgres(): boolean {
+    if (this.mode === 'postgres') return true;
+    if (this.mode === 'file') return false;
+    return this.pgOnline;
   }
 
   get provider(): StoreProvider {
@@ -422,13 +559,20 @@ export class RestaurantStore {
     await this.ready;
   }
 
-  private loadOrCreateDataFileSync(): DataFile {
+  /**
+   * Reads and validates the local JSON file.
+   *
+   * Returns `null` when there is no file (or it is unreadable/unparseable) and
+   * **never creates one**, so it is safe to call purely as a "does real local
+   * data exist?" probe — which is how the Postgres bootstrap decides whether
+   * there is anything worth migrating.
+   */
+  private readDataFileSync(): DataFile | null {
     let raw: string;
     try {
       raw = fs.readFileSync(DATA_FILE, 'utf8');
     } catch {
-      // No saved data yet (first start) — build the seeded snapshot.
-      return this.createDataFile();
+      return null;
     }
 
     let parsed: Partial<DataFile>;
@@ -463,6 +607,16 @@ export class RestaurantStore {
       waiterCalls: Array.isArray(parsed.waiterCalls) ? parsed.waiterCalls : base.waiterCalls,
       counters: { orders: Number(parsed.counters?.orders) || deriveCounter() },
     };
+  }
+
+  /** Loads the local file, creating (and seeding) it on first use. */
+  private loadOrCreateDataFileSync(): DataFile {
+    const existing = this.readDataFileSync();
+    if (existing) {
+      this.localFileExisted = true;
+      return existing;
+    }
+    return this.createDataFile();
   }
 
   private createDataFile(): DataFile {
@@ -589,16 +743,97 @@ export class RestaurantStore {
   }
 
   private async initialize() {
-    if (this.usePostgres) {
-      if (await this.initPostgresOnce()) return;
+    if (this.mode !== 'file') {
+      if (await this.bootstrapPostgres()) return;
     }
-    console.log('[store] Persistence: local file data/restaurant.json (no cloud services).');
-    // DATABASE_URL is configured but the database was not reachable on first
-    // try (sleeping serverless DB, transient DNS/SSL hiccup, bad URL, …).
-    // Retry in the background so the store upgrades itself to real, shared,
-    // durable data the moment the database comes back — instead of silently
-    // staying on per-instance /tmp files forever.
-    if (postgresConfigured) this.schedulePostgresRecovery();
+
+    // ── Postgres is unreachable ────────────────────────────────────────────
+    if (this.mode === 'postgres') {
+      // FAIL LOUD. There is no local file to fall back to, by design: on a
+      // serverless platform a local file gives every instance its own private
+      // copy of the data, which is precisely the "orders and menu items keep
+      // disappearing and reappearing" bug. Every data route now returns 503
+      // with the hint below until the database answers again.
+      console.error(
+        `\n[store] ==================================================================\n` +
+          `[store] POSTGRES UNREACHABLE — the app is refusing to serve café data.\n` +
+          `[store]   host:  ${this.pgErrorHost() || '(not configured)'}\n` +
+          `[store]   phase: ${this.pgError?.phase || 'unknown'}\n` +
+          `[store]   error: ${this.pgError?.message || 'unknown error'}\n` +
+          `[store]   fix:   ${this.pgError?.hint || 'Set DATABASE_URL correctly and redeploy.'}\n` +
+          `[store] Reads and writes will fail with HTTP 503 until this is fixed. No data\n` +
+          `[store] is being served from a local file — check /api/health for live state.\n` +
+          `[store] ==================================================================\n`
+      );
+      // Keep retrying in the background so the deployment heals itself the
+      // moment the database comes back, without needing a redeploy.
+      this.schedulePostgresRecovery();
+      return;
+    }
+
+    // ── Local JSON file ────────────────────────────────────────────────────
+    this.memory = this.loadOrCreateDataFileSync();
+    if (postgresConfigured) {
+      // Development-only fallback (ALLOW_LOCAL_FILE_FALLBACK). Loud on purpose:
+      // this used to be a single-line console.log, so an operator watching the
+      // logs saw "Persistence: local file" and had no idea the database was
+      // down or that their data was about to diverge.
+      console.error(
+        `\n[store] ==================================================================\n` +
+          `[store] POSTGRES UNREACHABLE — FALLING BACK TO THE LOCAL FILE (dev only).\n` +
+          `[store]   host:  ${this.pgErrorHost()}\n` +
+          `[store]   error: ${this.pgError?.message || 'unknown error'}\n` +
+          `[store]   fix:   ${this.pgError?.hint || 'Check DATABASE_URL.'}\n` +
+          `[store] Data is being served from ${DATA_FILE}. In production this fallback\n` +
+          `[store] is disabled: set ALLOW_LOCAL_FILE_FALLBACK=false to match production.\n` +
+          `[store] ==================================================================\n`
+      );
+      this.schedulePostgresRecovery();
+    } else {
+      console.log(`[store] Persistence: local file ${DATA_FILE} (no DATABASE_URL configured).`);
+    }
+  }
+
+  private pgErrorHost(): string {
+    try {
+      return new URL(pgUrl).hostname;
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Bootstrap Postgres, retrying *transient* failures inside the cold start.
+   *
+   * A paused free-tier database or a socket left stale by a frozen lambda
+   * almost always connects on the second attempt, so retrying here turns a
+   * whole class of "the site is broken" reports into a ~1s delay. Errors that
+   * can never succeed (bad URL, wrong password, missing database) fail fast on
+   * attempt 1 — retrying them would just make the outage slower to diagnose.
+   */
+  private async bootstrapPostgres(): Promise<boolean> {
+    for (let attempt = 1; attempt <= PG_BOOTSTRAP_ATTEMPTS; attempt += 1) {
+      if (await this.initPostgresOnce()) return true;
+      if (attempt === PG_BOOTSTRAP_ATTEMPTS || !this.isRetryableBootstrapError()) break;
+      const delay = 400 * 2 ** (attempt - 1); // 400ms, then 800ms
+      console.warn(
+        `[store] Postgres bootstrap attempt ${attempt}/${PG_BOOTSTRAP_ATTEMPTS} failed ` +
+          `(${this.pgError?.message}); retrying in ${delay}ms.`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+    return false;
+  }
+
+  /**
+   * A bootstrap failure is only worth retrying when the *connection* is at
+   * fault. Configuration mistakes (unparseable URL, rejected password, missing
+   * database) return the same error every time.
+   */
+  private isRetryableBootstrapError(): boolean {
+    const code = this.pgError?.code || '';
+    if (['INVALID_DATABASE_URL', '28P01', '3D000', '28000'].includes(code)) return false;
+    return isTransientPgError({ code, message: this.pgError?.message || '' });
   }
 
   /**
@@ -625,25 +860,21 @@ export class RestaurantStore {
       this.pgPhase = 'ssl-probe';
       await this.ensurePostgresSchema();
       this.pgPhase = 'seed';
-      const settings = await this.getSettingsInternal();
-      if (!settings) await this.putSettingsInternal(initialSettings);
-      await this.seedMissing('categories', initialCategories);
-      await this.seedMissing('tables', initialTables);
-      await this.seedMissing('products', initialProducts);
-      // Carry over anything recorded locally while the database was down, so
-      // orders/feedback never vanish at the moment the connection heals.
+      await this.seedStarterDataOnce();
+      // Carry over anything recorded in the local data file, so a deployment
+      // upgrading from file storage to Postgres loses nothing.
       await this.migrateLocalRecordsToPostgres();
       this.pgPhase = 'counter';
       await this.ensureCounter();
       // If the store already issued order numbers from the local file, make
       // sure the database counter never hands out a duplicate.
       await this.raisePgCounterToLocalMax();
-      this.usePostgres = true;
+      this.pgOnline = true;
       this.pgError = null;
-      console.log('[store] Persistence: direct Postgres (DATABASE_URL).');
+      console.log(`[store] Persistence: direct Postgres (DATABASE_URL) — host ${host || '(unknown)'}.`);
       return true;
     } catch (error) {
-      this.usePostgres = false;
+      this.pgOnline = false;
       const message = (error as Error)?.message || String(error);
       const code = (error as { code?: string })?.code;
       this.pgError = {
@@ -653,9 +884,11 @@ export class RestaurantStore {
         at: new Date().toISOString(),
         hint: pgErrorHint({ message, code }, host, this.pgPhase),
       };
-      console.warn(
-        `[store] Postgres configured but unreachable during '${this.pgPhase}'; using the local data file instead.`,
-        this.pgError.message
+      // `console.error`, not `console.warn`: this is an outage, not a nit. The
+      // full message is also logged by initialize() once the retries give up.
+      console.error(
+        `[store] Postgres bootstrap failed during the '${this.pgPhase}' step: ${this.pgError.message}` +
+          (this.pgError.hint ? ` | fix: ${this.pgError.hint}` : '')
       );
       return false;
     }
@@ -668,7 +901,10 @@ export class RestaurantStore {
    * start beat the database wake-up, without ever blocking requests.
    */
   private schedulePostgresRecovery() {
-    if (!postgresConfigured || this.pgRecoveryTimer || this.usePostgres) return;
+    // Keyed off `pgOnline`, not `usePostgres`: in `'postgres'` mode
+    // `usePostgres` is permanently true, and checking it here would disable
+    // recovery exactly when the app is down and needs it most.
+    if (!postgresConfigured || this.pgRecoveryTimer || this.pgOnline) return;
     const delay = Math.min(300_000, 30_000 * 2 ** Math.min(this.pgRecoveryAttempts - 1, 3));
     this.pgRecoveryTimer = setTimeout(() => {
       this.pgRecoveryTimer = null;
@@ -693,11 +929,15 @@ export class RestaurantStore {
     }
     return {
       provider: this.provider,
+      storageMode: this.mode,
+      postgresRequired,
+      failingLoudly: this.mode === 'postgres' && !this.pgOnline,
+      localFileFallbackActive: this.mode === 'postgres-with-file-fallback' && !this.pgOnline,
       postgresConfigured,
       postgresHost,
       postgresStatus: !postgresConfigured
         ? 'not-configured'
-        : this.usePostgres
+        : this.pgOnline
           ? 'connected'
           : 'unavailable',
       postgresError: this.pgError,
@@ -757,6 +997,9 @@ export class RestaurantStore {
    * issues a duplicate order number.
    */
   private async raisePgCounterToLocalMax() {
+    // Only meaningful when a real local file was in use; `this.memory` holds
+    // the seed counter (1040) otherwise, and `greatest(value, 1040)` is a no-op.
+    if (!this.localFileExisted) return;
     try {
       const localMax = this.memory.counters.orders || 0;
       await queryWithRetry(
@@ -767,6 +1010,62 @@ export class RestaurantStore {
       // Non-fatal: the counter is only a monotonicity guard.
       console.warn('[store] Could not sync the Postgres order counter:', (error as Error)?.message || error);
     }
+  }
+
+  /**
+   * Inserts the starter categories/tables/menu into a **fresh** database — once.
+   *
+   * This used to run on every connect (and every background recovery), which
+   * is the other half of the "my data keeps reappearing" bug: deleting a menu
+   * item in the admin panel only removed its row, and the very next cold start
+   * re-ran the seed and silently put it back. The starter records have fixed
+   * ids (`prod-samosa`, `cat-snacks`, …), so an admin could delete one as often
+   * as they liked and Vercel would keep resurrecting it.
+   *
+   * Seeding is now guarded by a marker row in `app_settings`, so a database
+   * that has ever been seeded is never seeded again.
+   */
+  private async seedStarterDataOnce(): Promise<void> {
+    const { rows: marker } = await queryWithRetry(
+      `select data from app_settings where id = $1 limit 1`,
+      [PG_BOOTSTRAP_MARKER]
+    );
+    if (marker[0]) return;
+
+    const settings = await this.getSettingsInternal();
+    if (!settings) await this.putSettingsInternal(initialSettings);
+
+    // A database populated by an older version of the app has no marker but
+    // does have a menu. Don't re-seed it — that would resurrect deletions.
+    if (await this.databaseHasAnyData()) {
+      await this.markDatabaseSeeded(false);
+      return;
+    }
+
+    await this.seedMissing('categories', initialCategories);
+    await this.seedMissing('tables', initialTables);
+    await this.seedMissing('products', initialProducts);
+    await this.markDatabaseSeeded(true);
+    console.log('[store] Seeded the starter menu into a fresh database (this happens once per database).');
+  }
+
+  private async markDatabaseSeeded(seeded: boolean): Promise<void> {
+    await queryWithRetry(
+      `insert into app_settings (id, data, updated_at)
+       values ($1, $2::jsonb, $3)
+       on conflict (id) do nothing`,
+      [PG_BOOTSTRAP_MARKER, JSON.stringify({ seeded, at: now(), schema: 'initial' }), now()]
+    );
+  }
+
+  /** Cheap "is this database already in use?" check, used to guard re-seeding. */
+  private async databaseHasAnyData(): Promise<boolean> {
+    const { rows } = await queryWithRetry(
+      `select (select count(*) from app_categories)
+            + (select count(*) from app_tables)
+            + (select count(*) from app_products) as total`
+    );
+    return Number(rows[0]?.total || 0) > 0;
   }
 
   private async seedMissing<C extends StoreCollection>(collection: C, records: CollectionModel[C][]) {
@@ -790,13 +1089,19 @@ export class RestaurantStore {
    * carried over, so this is safe to run on every (re)connect.
    */
   private async migrateLocalRecordsToPostgres() {
+    // Read the file from disk rather than from `this.memory`: memory now holds
+    // nothing but the seeded defaults until a file store is actually in use,
+    // and seeding those defaults into a real database would be nonsense.
+    const local = this.readDataFileSync();
+    if (!local) return;
+
     const collections: StoreCollection[] = ['categories', 'tables', 'products', 'orders', 'feedbacks', 'waiterCalls'];
     let migrated = 0;
     for (const collection of collections) {
-      const local = this.memory[collection] as unknown as Array<{ id: string; createdAt?: string }>;
-      if (!Array.isArray(local) || local.length === 0) continue;
+      const records = local[collection] as unknown as Array<{ id: string; createdAt?: string }>;
+      if (!Array.isArray(records) || records.length === 0) continue;
       const table = pgTableName(collection);
-      for (const record of local) {
+      for (const record of records) {
         if (!record || !record.id) continue;
         const timestamp = record.createdAt || now();
         try {
@@ -813,7 +1118,7 @@ export class RestaurantStore {
         }
       }
     }
-    const localSettings = this.memory.settings;
+    const localSettings = local.settings;
     if (localSettings) {
       try {
         await queryWithRetry(
@@ -831,12 +1136,34 @@ export class RestaurantStore {
     }
   }
 
+  /**
+   * Gate for every data read and write.
+   *
+   * Waits for the one-time bootstrap, then — when Postgres is the mandatory
+   * store and it is down — throws instead of letting the caller quietly read a
+   * different data source. This is the single place that enforces "fail loudly,
+   * never silently fall back to local files".
+   */
   private async ensureReady() {
     await this.ready;
+    if (this.mode !== 'postgres' || this.pgOnline) return;
+
+    // Give a healing database a chance to be picked up by a live request
+    // instead of making the caller wait for the background timer. Single-flight
+    // and rate-limited, so a burst of requests cannot stampede the database.
+    const stale = Date.now() - this.pgLastProbeMs > PG_RETRY_COALESCE_MS;
+    if (!this.pgRecoveryInFlight && stale) {
+      this.pgLastProbeMs = Date.now();
+      this.pgRecoveryInFlight = this.initPostgresOnce().finally(() => {
+        this.pgRecoveryInFlight = null;
+      });
+    }
+    if (this.pgRecoveryInFlight) await this.pgRecoveryInFlight;
+
+    if (!this.pgOnline) throw new PostgresUnavailableError(this.pgError);
   }
 
   private async ensureCounter() {
-    if (!this.usePostgres) return;
     await queryWithRetry(
       `insert into app_counters (id, value) values ('orders', 1040) on conflict (id) do nothing`
     );

@@ -16,7 +16,7 @@ import type {
   SalesSummary,
   WaiterCall,
 } from '../types.js';
-import { store, postgresConfigured, newId } from './store.js';
+import { PostgresUnavailableError, store, postgresConfigured, newId } from './store.js';
 import { initialSettings } from './seed.js';
 import {
   changeAdminPassword,
@@ -180,6 +180,61 @@ function jsonError(res: Response, status: number, message: string) {
   return res.status(status).json({ error: message });
 }
 
+/**
+ * Maps a storage failure onto the response a client should actually see.
+ *
+ * When Postgres is the mandatory store and it is unreachable, the request
+ * fails with **503 + the actionable hint** rather than a generic 500 — and,
+ * critically, it does not quietly succeed using a local JSON file. A 500 here
+ * used to be the only symptom of a dead database, which is indistinguishable
+ * from an application bug and tells the operator nothing about how to fix it.
+ */
+function storeError(res: Response, error: unknown, fallbackMessage: string) {
+  if (error instanceof PostgresUnavailableError) {
+    res.set('Cache-Control', 'no-store');
+    return res.status(503).json({
+      error: 'The café database is unreachable. Nothing was read or written — please fix DATABASE_URL and try again.',
+      code: 'POSTGRES_UNAVAILABLE',
+      hint: error.hint,
+      postgres: { phase: error.phase, code: error.pgCode, message: error.message },
+    });
+  }
+  return jsonError(res, 500, fallbackMessage);
+}
+
+/** Rate-limits the outage log so a dead database cannot flood the log stream. */
+let lastOutageLogAt = 0;
+function logPostgresOutage(error: PostgresUnavailableError) {
+  const nowMs = Date.now();
+  if (nowMs - lastOutageLogAt < 30_000) return;
+  lastOutageLogAt = nowMs;
+  console.error(
+    `[api] 503 — Postgres unavailable (phase=${error.phase}${error.pgCode ? `, code=${error.pgCode}` : ''}): ${error.message}` +
+      (error.hint ? `\n[api]     fix: ${error.hint}` : '')
+  );
+}
+
+type RouteHandler = (req: any, res: any, next?: any) => unknown;
+
+/**
+ * Express 4 does not catch rejections from `async` route handlers: an `await`
+ * that throws becomes an *unhandled promise rejection*, which Vercel reports as
+ * FUNCTION_INVOCATION_FAILED and which can take the whole serverless instance
+ * down. Wrapping every handler guarantees a thrown error — a dead database
+ * included — becomes a proper HTTP response instead of a crash.
+ */
+function withAsyncErrorHandling(handler: RouteHandler): RouteHandler {
+  // 3-arg functions are middleware (`(req, res, next)`); leave them alone.
+  if (handler.length > 2) return handler;
+  return (req, res, next) => {
+    try {
+      Promise.resolve(handler(req, res)).catch(next);
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+
 function getBearerToken(req: Request) {
   const header = req.headers.authorization;
   return header?.startsWith('Bearer ') ? header.slice(7).trim() : '';
@@ -238,13 +293,28 @@ async function sendWhatsAppNotification(order: Order, settings: CafeSettings): P
 /** Builds the Express app with all API routes. Used by the local server and by Vercel. */
 export function createApp() {
   const app = express();
+
+  /**
+   * Route registration helpers. Same signatures as `app.get/post/...`, but
+   * every `(req, res)` handler is wrapped by `withAsyncErrorHandling`, so a
+   * rejected promise from an `async` handler is turned into an HTTP response
+   * instead of an unhandled rejection that kills the serverless instance.
+   */
+  const route = {
+    get: (path: string, ...handlers: RouteHandler[]) => app.get(path, ...(handlers.map(withAsyncErrorHandling) as never[])),
+    post: (path: string, ...handlers: RouteHandler[]) => app.post(path, ...(handlers.map(withAsyncErrorHandling) as never[])),
+    put: (path: string, ...handlers: RouteHandler[]) => app.put(path, ...(handlers.map(withAsyncErrorHandling) as never[])),
+    patch: (path: string, ...handlers: RouteHandler[]) => app.patch(path, ...(handlers.map(withAsyncErrorHandling) as never[])),
+    delete: (path: string, ...handlers: RouteHandler[]) => app.delete(path, ...(handlers.map(withAsyncErrorHandling) as never[])),
+  };
+
   // Behind a reverse proxy (preview sandbox, Vercel, nginx) use the real
   // client IP from X-Forwarded-For for logging/rate-limiting.
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-  app.get('/api/health', (_req, res) => {
+  route.get('/api/health', (_req, res) => {
     const diagnostics = store.getDiagnostics();
     res.set('Cache-Control', 'no-store');
     res.json({
@@ -253,6 +323,12 @@ export function createApp() {
       // Commit that produced this deploy, when running on Vercel.
       deploySha: process.env.VERCEL_GIT_COMMIT_SHA || null,
       persistence: diagnostics.provider,
+      // How this process is allowed to store data, and whether an unreachable
+      // database makes it fail loudly instead of using a local file.
+      storageMode: diagnostics.storageMode,
+      postgresRequired: diagnostics.postgresRequired,
+      failingLoudly: diagnostics.failingLoudly,
+      localFileFallbackActive: diagnostics.localFileFallbackActive,
       postgresConfigured: diagnostics.postgresConfigured,
       storage: diagnostics.provider === 'postgres' ? 'database' : 'local-json-file',
       postgres: diagnostics.postgresConfigured
@@ -278,7 +354,7 @@ export function createApp() {
   // ----------------------------------------------------
   // Public customer APIs
   // ----------------------------------------------------
-  app.get('/api/public/tables', async (_req, res) => {
+  route.get('/api/public/tables', async (_req, res) => {
     try {
       const tables = (await store.list('tables'))
         .filter((table) => table.isActive)
@@ -287,11 +363,11 @@ export function createApp() {
       res.json({ tables });
     } catch (error) {
       console.error('Public tables error:', error);
-      jsonError(res, 500, 'Unable to load tables from the café database.');
+      storeError(res, error, 'Unable to load tables from the café database.');
     }
   });
 
-  app.get('/api/table/:token', async (req, res) => {
+  route.get('/api/table/:token', async (req, res) => {
     try {
       const snapshot = await store.snapshot();
       const table = findTable(snapshot.tables, decodeURIComponent(req.params.token || ''));
@@ -306,11 +382,11 @@ export function createApp() {
       });
     } catch (error) {
       console.error('Table menu error:', error);
-      jsonError(res, 500, 'Unable to load the menu from the café database.');
+      storeError(res, error, 'Unable to load the menu from the café database.');
     }
   });
 
-  app.get('/api/table/:token/orders', async (req, res) => {
+  route.get('/api/table/:token/orders', async (req, res) => {
     try {
       const snapshot = await store.snapshot();
       const table = findTable(snapshot.tables, decodeURIComponent(req.params.token || ''));
@@ -321,11 +397,11 @@ export function createApp() {
       res.json({ table: { id: table.id, tableNumber: table.tableNumber, name: table.name, token: table.token }, orders });
     } catch (error) {
       console.error('Table orders error:', error);
-      jsonError(res, 500, 'Unable to load order history from the café database.');
+      storeError(res, error, 'Unable to load order history from the café database.');
     }
   });
 
-  app.post('/api/orders', async (req, res) => {
+  route.post('/api/orders', async (req, res) => {
     try {
       const ip = req.ip || req.socket.remoteAddress || 'unknown';
       const { tableToken, tableId, tableNumber, tableName, customerName, customerPhone, specialInstructions, items, clientRequestId } = req.body || {};
@@ -408,11 +484,11 @@ export function createApp() {
       res.status(201).json({ success: true, order, message: 'Order placed successfully!' });
     } catch (error: any) {
       console.error('Order creation error:', error);
-      jsonError(res, 500, error?.message || 'Internal server error while placing order.');
+      storeError(res, error, error?.message || 'Internal server error while placing order.');
     }
   });
 
-  app.get('/api/orders/track/:orderId', async (req, res) => {
+  route.get('/api/orders/track/:orderId', async (req, res) => {
     try {
       const orders = await store.list('orders');
       const order = orders.find((candidate) => candidate.id === req.params.orderId || candidate.orderNumber === req.params.orderId);
@@ -420,11 +496,11 @@ export function createApp() {
       res.json({ order });
     } catch (error) {
       console.error('Track order error:', error);
-      jsonError(res, 500, 'Unable to track the order from the café database.');
+      storeError(res, error, 'Unable to track the order from the café database.');
     }
   });
 
-  app.post('/api/waiter-call', async (req, res) => {
+  route.post('/api/waiter-call', async (req, res) => {
     try {
       const { tableToken, tableId, tableNumber, tableName, customerName } = req.body || {};
       const tables = await store.list('tables');
@@ -444,11 +520,11 @@ export function createApp() {
       res.json({ success: true, call, message: `Waiter notified for ${call.tableName}! Staff is heading to your table.` });
     } catch (error) {
       console.error('Waiter call error:', error);
-      jsonError(res, 500, 'Failed to notify waiter.');
+      storeError(res, error, 'Failed to notify waiter.');
     }
   });
 
-  app.post('/api/feedback', async (req, res) => {
+  route.post('/api/feedback', async (req, res) => {
     try {
       const { orderId, orderNumber, tableNumber, tableName, customerName, rating, comment } = req.body || {};
       if (!rating || Number(rating) < 1 || Number(rating) > 5) return jsonError(res, 400, 'Rating must be between 1 and 5 stars.');
@@ -467,7 +543,7 @@ export function createApp() {
       res.status(201).json({ success: true, feedback, message: 'Thank you for your valuable rating and feedback!' });
     } catch (error) {
       console.error('Feedback submit error:', error);
-      jsonError(res, 500, 'Failed to submit feedback.');
+      storeError(res, error, 'Failed to submit feedback.');
     }
   });
 
@@ -475,7 +551,7 @@ export function createApp() {
   // Single admin login + protected admin APIs
   // ----------------------------------------------------
   // The one and only login: the single admin password. No cloud auth service.
-  app.post('/api/admin/login', (req, res) => {
+  route.post('/api/admin/login', (req, res) => {
     const configurationError = getAdminAuthConfigurationError();
     if (configurationError) return jsonError(res, 503, configurationError);
 
@@ -502,17 +578,17 @@ export function createApp() {
     });
   });
 
-  app.get('/api/admin/me', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
+  route.get('/api/admin/me', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
     res.json({ email: req.adminUser?.email || adminEmail, cafeName: (await store.getSettings()).cafeName });
   });
 
   // Sessions are stateless (signed tokens), so logging out is a client-side
   // token removal; the token itself simply expires after its 7-day lifetime.
-  app.post('/api/admin/logout', requireAdminAuth, (_req, res) => {
+  route.post('/api/admin/logout', requireAdminAuth, (_req, res) => {
     res.json({ success: true });
   });
 
-  app.get('/api/admin/orders', requireAdminAuth, async (req, res) => {
+  route.get('/api/admin/orders', requireAdminAuth, async (req, res) => {
     try {
       let orders = await store.list('orders');
       const status = getIdentifier(req.query.status);
@@ -523,11 +599,11 @@ export function createApp() {
       res.json({ orders });
     } catch (error) {
       console.error('Admin orders error:', error);
-      jsonError(res, 500, 'Failed to fetch orders from the café database.');
+      storeError(res, error, 'Failed to fetch orders from the café database.');
     }
   });
 
-  app.patch('/api/admin/orders/:id/status', requireAdminAuth, async (req, res) => {
+  route.patch('/api/admin/orders/:id/status', requireAdminAuth, async (req, res) => {
     try {
       const order = await store.get('orders', req.params.id);
       if (!order) return jsonError(res, 404, 'Order not found.');
@@ -545,11 +621,11 @@ export function createApp() {
       res.json({ success: true, order: updatedOrder });
     } catch (error) {
       console.error('Order status error:', error);
-      jsonError(res, 500, 'Failed to update order status.');
+      storeError(res, error, 'Failed to update order status.');
     }
   });
 
-  app.patch('/api/admin/orders/:id/payment', requireAdminAuth, async (req, res) => {
+  route.patch('/api/admin/orders/:id/payment', requireAdminAuth, async (req, res) => {
     try {
       const order = await store.get('orders', req.params.id);
       if (!order) return jsonError(res, 404, 'Order not found.');
@@ -560,15 +636,15 @@ export function createApp() {
       res.json({ success: true, order: updatedOrder });
     } catch (error) {
       console.error('Payment status error:', error);
-      jsonError(res, 500, 'Failed to update payment status.');
+      storeError(res, error, 'Failed to update payment status.');
     }
   });
 
-  app.get('/api/admin/products', requireAdminAuth, async (_req, res) => {
+  route.get('/api/admin/products', requireAdminAuth, async (_req, res) => {
     res.json({ products: (await store.list('products')).sort((a, b) => a.displayOrder - b.displayOrder) });
   });
 
-  app.post('/api/admin/products', requireAdminAuth, async (req, res) => {
+  route.post('/api/admin/products', requireAdminAuth, async (req, res) => {
     try {
       const body = req.body || {};
       const timestamp = new Date().toISOString();
@@ -593,11 +669,11 @@ export function createApp() {
       res.status(201).json({ success: true, product });
     } catch (error: any) {
       console.error('Create product error:', error);
-      jsonError(res, 500, error?.message || 'Failed to add product.');
+      storeError(res, error, error?.message || 'Failed to add product.');
     }
   });
 
-  app.put('/api/admin/products/:id', requireAdminAuth, async (req, res) => {
+  route.put('/api/admin/products/:id', requireAdminAuth, async (req, res) => {
     try {
       const existing = await store.get('products', req.params.id);
       if (!existing) return jsonError(res, 404, 'Product not found.');
@@ -617,11 +693,11 @@ export function createApp() {
       res.json({ success: true, product });
     } catch (error: any) {
       console.error('Edit product error:', error);
-      jsonError(res, 500, error?.message || 'Failed to update product.');
+      storeError(res, error, error?.message || 'Failed to update product.');
     }
   });
 
-  app.patch('/api/admin/products/:id/availability', requireAdminAuth, async (req, res) => {
+  route.patch('/api/admin/products/:id/availability', requireAdminAuth, async (req, res) => {
     const product = await store.get('products', req.params.id);
     if (!product) return jsonError(res, 404, 'Product not found.');
     const updated = { ...product, isAvailable: !product.isAvailable, updatedAt: new Date().toISOString() };
@@ -629,14 +705,14 @@ export function createApp() {
     res.json({ success: true, product: updated });
   });
 
-  app.delete('/api/admin/products/:id', requireAdminAuth, async (req, res) => {
+  route.delete('/api/admin/products/:id', requireAdminAuth, async (req, res) => {
     const product = await store.get('products', req.params.id);
     if (!product) return jsonError(res, 404, 'Product not found.');
     await store.remove('products', req.params.id);
     res.json({ success: true });
   });
 
-  app.get('/api/admin/tables', requireAdminAuth, async (_req, res) => {
+  route.get('/api/admin/tables', requireAdminAuth, async (_req, res) => {
     const snapshot = await store.snapshot();
     const tables = snapshot.tables.map((table) => ({
       ...table,
@@ -645,7 +721,7 @@ export function createApp() {
     res.json({ tables });
   });
 
-  app.post('/api/admin/tables', requireAdminAuth, async (req, res) => {
+  route.post('/api/admin/tables', requireAdminAuth, async (req, res) => {
     const tableNumber = Number(req.body?.tableNumber);
     if (!Number.isFinite(tableNumber) || tableNumber <= 0) return jsonError(res, 400, 'Valid table number is required.');
     const tables = await store.list('tables');
@@ -662,7 +738,7 @@ export function createApp() {
     res.status(201).json({ success: true, table });
   });
 
-  app.patch('/api/admin/tables/:id/toggle', requireAdminAuth, async (req, res) => {
+  route.patch('/api/admin/tables/:id/toggle', requireAdminAuth, async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     const updated = { ...table, isActive: !table.isActive };
@@ -670,7 +746,7 @@ export function createApp() {
     res.json({ success: true, table: updated });
   });
 
-  app.patch('/api/admin/tables/:id/regenerate-token', requireAdminAuth, async (req, res) => {
+  route.patch('/api/admin/tables/:id/regenerate-token', requireAdminAuth, async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     const updated = { ...table, token: `nagori_tbl_tok_table${table.tableNumber}_${crypto.randomBytes(6).toString('hex')}` };
@@ -678,18 +754,18 @@ export function createApp() {
     res.json({ success: true, table: updated });
   });
 
-  app.delete('/api/admin/tables/:id', requireAdminAuth, async (req, res) => {
+  route.delete('/api/admin/tables/:id', requireAdminAuth, async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     await store.remove('tables', req.params.id);
     res.json({ success: true });
   });
 
-  app.get('/api/admin/categories', requireAdminAuth, async (_req, res) => {
+  route.get('/api/admin/categories', requireAdminAuth, async (_req, res) => {
     res.json({ categories: (await store.list('categories')).sort((a, b) => a.displayOrder - b.displayOrder) });
   });
 
-  app.post('/api/admin/categories', requireAdminAuth, async (req, res) => {
+  route.post('/api/admin/categories', requireAdminAuth, async (req, res) => {
     const name = getIdentifier(req.body?.name);
     if (!name) return jsonError(res, 400, 'Category name is required.');
     const categories = await store.list('categories');
@@ -698,7 +774,7 @@ export function createApp() {
     res.status(201).json({ success: true, category });
   });
 
-  app.put('/api/admin/categories/:id', requireAdminAuth, async (req, res) => {
+  route.put('/api/admin/categories/:id', requireAdminAuth, async (req, res) => {
     const name = getIdentifier(req.body?.name);
     if (!name) return jsonError(res, 400, 'Valid category name is required.');
     const category = await store.get('categories', req.params.id);
@@ -711,19 +787,19 @@ export function createApp() {
     res.json({ success: true, category: updatedCategory, updatedProductsCount: products.filter((product) => product.category.toLowerCase() === oldName.toLowerCase()).length });
   });
 
-  app.delete('/api/admin/categories/:id', requireAdminAuth, async (req, res) => {
+  route.delete('/api/admin/categories/:id', requireAdminAuth, async (req, res) => {
     const category = await store.get('categories', req.params.id);
     if (!category) return jsonError(res, 404, 'Category not found.');
     await store.remove('categories', req.params.id);
     res.json({ success: true });
   });
 
-  app.get('/api/admin/waiter-calls', requireAdminAuth, async (_req, res) => {
+  route.get('/api/admin/waiter-calls', requireAdminAuth, async (_req, res) => {
     const calls = (await store.list('waiterCalls')).sort((a, b) => new Date(b.calledAt || b.createdAt || 0).getTime() - new Date(a.calledAt || a.createdAt || 0).getTime());
     res.json({ calls });
   });
 
-  app.patch('/api/admin/waiter-calls/:id/attend', requireAdminAuth, async (req, res) => {
+  route.patch('/api/admin/waiter-calls/:id/attend', requireAdminAuth, async (req, res) => {
     const call = await store.get('waiterCalls', req.params.id);
     if (!call) return jsonError(res, 404, 'Waiter call not found.');
     const updated = { ...call, status: 'attended' as const, attendedAt: new Date().toISOString() };
@@ -731,7 +807,7 @@ export function createApp() {
     res.json({ success: true, call: updated });
   });
 
-  app.get('/api/admin/feedbacks', requireAdminAuth, async (_req, res) => {
+  route.get('/api/admin/feedbacks', requireAdminAuth, async (_req, res) => {
     const feedbacks = (await store.list('feedbacks')).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     const averageRating = feedbacks.length ? Number((feedbacks.reduce((sum, item) => sum + item.rating, 0) / feedbacks.length).toFixed(1)) : 0;
     const ratingDistribution: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
@@ -739,7 +815,7 @@ export function createApp() {
     res.json({ feedbacks, averageRating, totalFeedbacks: feedbacks.length, ratingDistribution });
   });
 
-  app.get('/api/admin/reports', requireAdminAuth, async (req, res) => {
+  route.get('/api/admin/reports', requireAdminAuth, async (req, res) => {
     const { range = 'today', startDate, endDate } = req.query;
     const nowDate = new Date();
     let filterStart = new Date(0);
@@ -774,11 +850,11 @@ export function createApp() {
     res.json({ summary });
   });
 
-  app.get('/api/admin/settings', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
+  route.get('/api/admin/settings', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
     res.json({ settings: await store.getSettings(), adminEmail: req.adminUser?.email || adminEmail });
   });
 
-  app.put('/api/admin/settings', requireAdminAuth, async (req, res) => {
+  route.put('/api/admin/settings', requireAdminAuth, async (req, res) => {
     const updates = req.body;
     if (!updates || typeof updates !== 'object') return jsonError(res, 400, 'Invalid settings payload.');
     const settings = { ...(await store.getSettings()), ...updates };
@@ -789,7 +865,7 @@ export function createApp() {
   // Change the single admin password. It is saved to the active credential
   // store (data/admin.json locally, database on Vercel) and takes effect
   // immediately — no restart and no cloud auth service needed.
-  app.post('/api/admin/change-password', requireAdminAuth, async (req, res) => {
+  route.post('/api/admin/change-password', requireAdminAuth, async (req, res) => {
     try {
       const currentPassword = getIdentifier(req.body?.currentPassword);
       const newPassword = getIdentifier(req.body?.newPassword);
@@ -798,8 +874,22 @@ export function createApp() {
       res.json({ success: true, message: result.message });
     } catch (error: any) {
       console.error('Change password error:', error);
-      jsonError(res, 500, error?.message || 'Failed to update the admin password.');
+      storeError(res, error, error?.message || 'Failed to update the admin password.');
     }
+  });
+
+  // Last-resort error handler. Nothing above should ever reach it (every route
+  // catches its own errors now), but if something does throw its way out, it
+  // must still become a response — with a database outage reported as 503 and
+  // not as an opaque crash.
+  app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    if (res.headersSent) return;
+    if (error instanceof PostgresUnavailableError) {
+      logPostgresOutage(error);
+      return storeError(res, error, 'The café database is unreachable.');
+    }
+    console.error('Unhandled API error:', error);
+    return jsonError(res, 500, (error as Error)?.message || 'Internal server error.');
   });
 
   return app;

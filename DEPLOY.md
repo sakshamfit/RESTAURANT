@@ -10,8 +10,9 @@ Open **`https://nagori-restaurent.vercel.app/api/health`** and read one field:
 | What you see | What it means | What to do |
 | --- | --- | --- |
 | `"persistence": "postgres"` + `"status": "connected"` | Backend **and** database are fine. | Hard-refresh the site (Ctrl/Cmd+Shift+R). If a page still misbehaves, note the exact URL + action and check the Vercel logs (below). |
-| `"postgresConfigured": true` + `"status": "unavailable"` | `DATABASE_URL` is set but the database refused/failed. Read `postgres.error.message` + `hint`. | Most common cause by far: the **free Supabase project auto-paused** after inactivity → open **supabase.com → your project → Restore**; the app reconnects by itself within a minute. Wrong/rotated password → re-copy the connection string (table below). |
-| `"persistence": "file"` + `"postgresConfigured": false` | `DATABASE_URL` is **not set** in this deployment's environment. | Vercel → Project → Settings → Environment Variables → add `DATABASE_URL` (and `ADMIN_PASSWORD`) → **Redeploy**. |
+| `"failingLoudly": true` | `DATABASE_URL` is set but the database refused/failed. The app is **refusing to read or write café data** — every data route answers `503 POSTGRES_UNAVAILABLE` with a `hint`. Nothing is being served from a local file, so no data can silently vanish. | Read `postgres.error.message` + `hint`. Most common cause by far: the **free Supabase project auto-paused** after inactivity → open **supabase.com → your project → Restore**; the app reconnects by itself within a minute. Wrong/rotated password → re-copy the connection string (table below). |
+| `"postgresConfigured": false` | `DATABASE_URL` is **not set** in this deployment's environment. In production the app also fails loudly here (it will not silently use `/tmp`). | Vercel → Project → Settings → Environment Variables → add `DATABASE_URL` (and `ADMIN_PASSWORD`) → **Redeploy**. |
+| `"localFileFallbackActive": true` | Development-only fallback in use: the database is down and the local file is serving data. | Never expected on Vercel — it means `ALLOW_LOCAL_FILE_FALLBACK=true` is set. Remove it so an outage fails loudly instead of showing divergent data. |
 
 Other quick checks:
 
@@ -64,12 +65,13 @@ as the permanent password and the settings screen as a temporary override.
 
 ## Options
 
-### A) No database (simplest)
-Works out of the box. Data lives in `/tmp/restaurant-data` **on each running
-instance**, so it survives warm invocations of that instance but is not shared
-between instances and resets on every cold start or redeploy. Fine for a
-demo/preview, not for real customers' order history — two guests can be served
-by different instances and see different data. Use option B for real use.
+### A) No database — local development only
+Works out of the box **on your machine**, where one process owns one real file.
+Do **not** use this on Vercel: serverless instances do not share `/tmp`, so each
+one keeps its own private copy of `data/restaurant.json` and the copy is wiped on
+every cold start. That is the "my menu items and orders keep disappearing and
+reappearing" bug. On Vercel the app therefore **fails loudly** (HTTP 503) instead
+of serving per-instance data — see option B, which is the supported deployment.
 
 ### B) Free Postgres (recommended for real use) — keeps all data forever
 1. Create a free Postgres database (e.g. **Neon** at neon.tech, or any
@@ -79,6 +81,17 @@ by different instances and see different data. Use option B for real use.
    - `DIRECT_URL` → same value (used only for the first schema migration)
 3. Redeploy. The app applies `db/schema.sql` automatically on first start.
    Menu, tables, orders, feedbacks etc. now persist across redeploys.
+
+With `DATABASE_URL` set, Postgres is the **only** store: every read and write of
+menu items, orders, feedbacks, tables, categories and settings goes through one
+shared connection pool. If the database becomes unreachable the API returns
+`503 POSTGRES_UNAVAILABLE` with an actionable hint and reads/writes nothing —
+it never silently falls back to a local JSON file. The instance keeps retrying
+in the background and heals itself once the database answers, with no redeploy.
+
+The starter menu (categories, 6 tables, the sample products) is seeded into a
+**fresh** database exactly once. Deleting a menu item in the admin panel is
+permanent — a cold start will not bring it back.
 
 ### C) Keep using Supabase Auth users?
 Not needed. The app has one admin login: **Admin → password only**. If you

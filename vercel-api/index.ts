@@ -15,10 +15,13 @@
 //   3. Its seeded menu, tables and routes were copied by hand and could fall out
 //      of sync with src/server/seed.ts and src/server/app.ts.
 //
-// Persistence on Vercel: /tmp/restaurant-data by default (survives warm
-// invocations of an instance, resets on cold start — see DEPLOY.md option A),
-// or your own Postgres when DATABASE_URL is set, which is what makes the data
-// stable across instances and redeploys (option B).
+// Persistence on Vercel: your own Postgres, via DATABASE_URL. Serverless
+// instances do not share /tmp, so a local JSON file there gives every instance
+// its own private copy of the menu and orders — that is the "my data keeps
+// disappearing and reappearing" failure. Postgres is therefore mandatory: if it
+// is unreachable every data route answers 503 POSTGRES_UNAVAILABLE with an
+// actionable hint and reads/writes nothing, and the instance reconnects in the
+// background. See DEPLOY.md option B.
 import type { IncomingMessage, ServerResponse } from 'http';
 // Explicit .js specifiers: the deployed Vercel Function runs these files as
 // native ESM ("type": "module"), where extensionless relative imports fail

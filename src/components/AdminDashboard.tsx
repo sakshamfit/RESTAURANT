@@ -305,7 +305,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       </header>
 
       {/* Backend Storage Health Banner (informative — shows where data is saved) */}
-      {backendHealth && backendHealth.persistence !== 'postgres' && (
+      {backendHealth && (backendHealth.persistence !== 'postgres' || backendHealth.failingLoudly) && (
         <div
           className={`px-4 py-2.5 text-xs font-semibold border-b flex flex-wrap items-center gap-2 ${
             backendHealth.postgresConfigured
@@ -314,14 +314,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           }`}
         >
           <span className="w-2 h-2 rounded-full bg-current animate-pulse shrink-0" />
-          {backendHealth.postgresConfigured ? (
+          {backendHealth.failingLoudly ? (
+            <>
+              <span>
+                ⚠{' '}
+                {backendHealth.postgres?.error?.code === '28P01'
+                  ? 'Database password rejected — the app has stopped serving café data'
+                  : 'Database is configured but NOT reachable — the app has stopped serving café data'}{' '}
+                (fail-loud mode). Orders and menu changes cannot be read or saved right now; nothing is being written to a
+                temporary file, so no data will silently vanish.
+              </span>
+              {backendHealth.postgres?.error?.hint && (
+                <span className="text-[11px] font-semibold text-red-700 basis-full sm:basis-auto sm:max-w-2xl">
+                  {backendHealth.postgres.error.hint}
+                </span>
+              )}
+              {backendHealth.postgres?.error?.message && (
+                <span className="text-[11px] font-mono text-red-600 truncate max-w-full">
+                  ({backendHealth.postgres.error.code ? `${backendHealth.postgres.error.code} · ` : ''}
+                  {backendHealth.postgres.error.message})
+                </span>
+              )}
+            </>
+          ) : backendHealth.postgresConfigured ? (
             <>
               <span>
                 ⚠{' '}
                 {backendHealth.postgres?.error?.code === '28P01'
                   ? 'Database password rejected'
                   : 'Database is configured but NOT reachable'}{' '}
-                — orders &amp; changes are saved to temporary storage and may disappear until this is fixed.
+                — falling back to a local file (development only). Orders &amp; changes saved now may not be the ones you
+                see next.
               </span>
               {backendHealth.postgres?.error?.hint && (
                 <span className="text-[11px] font-semibold text-red-700 basis-full sm:basis-auto sm:max-w-2xl">

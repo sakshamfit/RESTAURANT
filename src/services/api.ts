@@ -111,6 +111,14 @@ export interface BackendHealth {
   app: string;
   deploySha?: string | null;
   persistence: 'postgres' | 'file';
+  /** How the backend is allowed to store data (see the server's `storageMode`). */
+  storageMode?: 'postgres' | 'postgres-with-file-fallback' | 'file';
+  /** Postgres is mandatory: an outage fails requests instead of using a local file. */
+  postgresRequired?: boolean;
+  /** Postgres is required right now and unreachable — every data request 503s. */
+  failingLoudly?: boolean;
+  /** DATABASE_URL is set, the database is down, and the local file is serving data. */
+  localFileFallbackActive?: boolean;
   postgresConfigured: boolean;
   storage: 'database' | 'local-json-file';
   postgres?: {
