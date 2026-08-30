@@ -11,6 +11,7 @@ import {
   Eye,
   Volume2,
   VolumeX,
+  BellRing,
   Star,
 } from 'lucide-react';
 import { Order, Product, CafeTable, CafeCategory, CafeSettings, WaiterCall } from '../types';
@@ -24,10 +25,19 @@ import { AdminWaiterCalls } from './AdminWaiterCalls';
 import { AdminFeedbacks } from './AdminFeedbacks';
 import {
   announceOrderReceived,
+  announceWaiterCall,
   prepareOrderVoiceAnnouncements,
   previewOrderVoiceAnnouncement,
   stopOrderVoiceAnnouncements,
 } from '../utils/orderVoiceAnnouncements';
+import {
+  playOrderChime,
+  playTestSiren,
+  playWaiterSiren,
+  setWaiterSirenDucked,
+  stopWaiterSiren,
+  unlockAudio,
+} from '../utils/alertSounds';
 
 interface AdminDashboardProps {
   adminEmail: string;
@@ -53,6 +63,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
   const [isVoiceAnnouncementActive, setIsVoiceAnnouncementActive] = useState<boolean>(false);
   const [voiceAnnouncementMessage, setVoiceAnnouncementMessage] = useState<string>('');
+  const [waiterAlarmActive, setWaiterAlarmActive] = useState<boolean>(false);
+  const [waiterAlarmTables, setWaiterAlarmTables] = useState<string[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
 
   // We identify incoming orders by their immutable ID, never by a count. That
@@ -63,10 +75,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const dashboardOpenedAtRef = useRef<number>(Date.now());
   const voiceEnabledRef = useRef<boolean>(true);
 
+  // Waiter-call detection: track the set of pending call IDs we already know
+  // about so only genuinely NEW calls trigger the siren/buzzer (old pending
+  // calls sitting from before the dashboard opened do not re-alarm).
+  const knownPendingCallIdsRef = useRef<Set<string> | null>(null);
+  const waiterAlarmActiveRef = useRef<boolean>(false);
+
   useEffect(() => {
     voiceEnabledRef.current = voiceEnabled;
     if (!voiceEnabled) {
       stopOrderVoiceAnnouncements();
+      stopWaiterSiren();
+      waiterAlarmActiveRef.current = false;
+      setWaiterAlarmActive(false);
       setIsVoiceAnnouncementActive(false);
     }
   }, [voiceEnabled]);
@@ -76,8 +97,58 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setIsVoiceAnnouncementActive(false);
   };
 
+  /** Stop the waiter siren/buzzer + its spoken announcement. */
+  const stopWaiterAlarm = React.useCallback(() => {
+    stopWaiterSiren();
+    waiterAlarmActiveRef.current = false;
+    setWaiterAlarmActive(false);
+    setWaiterAlarmTables([]);
+    stopOrderVoiceAnnouncements();
+    setIsVoiceAnnouncementActive(false);
+  }, []);
+
+  /**
+   * Fire the loud waiter-call alarm: repeating service-bell siren plus a spoken
+   * "Table X is requesting a waiter" announcement. The siren ducks (lowers)
+   * while the voice speaks so both are clearly heard.
+   */
+  const triggerWaiterAlarm = React.useCallback((newCalls: WaiterCall[]) => {
+    if (!voiceEnabledRef.current || newCalls.length === 0) return;
+
+    unlockAudio();
+    playWaiterSiren();
+    waiterAlarmActiveRef.current = true;
+    setWaiterAlarmActive(true);
+
+    const tableNames = newCalls
+      .map((c) => (c.tableName?.trim() || `Table ${c.tableNumber}`))
+      .slice(0, 4);
+    setWaiterAlarmTables(tableNames);
+
+    const first = newCalls[0];
+    announceWaiterCall(
+      { tableName: first.tableName, tableNumber: first.tableNumber },
+      {
+        onStart: (message) => {
+          setWaiterSirenDucked(true);
+          setVoiceAnnouncementMessage(`🔔 Waiter alert: ${message}`);
+          setIsVoiceAnnouncementActive(true);
+        },
+        onFinish: () => {
+          setWaiterSirenDucked(false);
+          setIsVoiceAnnouncementActive(false);
+        },
+      }
+    );
+  }, []);
+
   const announceOrders = (incomingOrders: Order[]) => {
     if (!voiceEnabledRef.current) return;
+
+    // A pleasant "ding-dong" leads into the spoken message so staff notice it
+    // instantly even if they're not looking at the screen.
+    unlockAudio();
+    playOrderChime();
 
     incomingOrders
       .sort((a, b) => new Date(a.timeline.createdAt).getTime() - new Date(b.timeline.createdAt).getTime())
@@ -90,6 +161,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           onFinish: () => setIsVoiceAnnouncementActive(false),
         });
       });
+  };
+
+  /**
+   * Observe the waiter-call feed. Only calls that become pending AFTER the
+   * first snapshot (i.e. a customer just pressed "Call Waiter") start the
+   * siren. When every pending call is attended, the alarm stops automatically.
+   */
+  const applyWaiterCalls = (calls: WaiterCall[]) => {
+    const pending = calls.filter((call) => call.status === 'pending');
+    const pendingIds = new Set(pending.map((call) => call.id));
+
+    // First snapshot: just record what's already pending, don't re-alarm old calls.
+    if (knownPendingCallIdsRef.current === null) {
+      knownPendingCallIdsRef.current = pendingIds;
+      return;
+    }
+
+    const freshPending = pending.filter(
+      (call) => !knownPendingCallIdsRef.current!.has(call.id)
+    );
+    knownPendingCallIdsRef.current = pendingIds;
+
+    if (freshPending.length > 0) {
+      triggerWaiterAlarm(freshPending);
+    } else if (pending.length === 0 && waiterAlarmActiveRef.current) {
+      // Every table has been attended — silence the buzzer.
+      stopWaiterSiren();
+      stopOrderVoiceAnnouncements();
+      waiterAlarmActiveRef.current = false;
+      setWaiterAlarmActive(false);
+      setWaiterAlarmTables([]);
+      setIsVoiceAnnouncementActive(false);
+    }
   };
 
   /**
@@ -118,7 +222,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const handleTestVoice = () => {
+    // A user gesture: unlock both the speech engine and the Web Audio context.
+    unlockAudio();
     prepareOrderVoiceAnnouncements();
+    playOrderChime();
     const started = previewOrderVoiceAnnouncement({
       onStart: (message) => {
         setVoiceAnnouncementMessage(`AI order voice: ${message}`);
@@ -131,6 +238,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setVoiceAnnouncementMessage('AI order voice is unavailable in this browser.');
       setIsVoiceAnnouncementActive(true);
       window.setTimeout(() => setIsVoiceAnnouncementActive(false), 4_000);
+    }
+  };
+
+  /** Staff self-test for the waiter buzzer/siren (rings ~4 seconds). */
+  const handleTestSiren = () => {
+    unlockAudio();
+    const started = playTestSiren();
+    if (!started) {
+      alert('Sound is not supported in this browser.');
     }
   };
 
@@ -156,7 +272,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         .catch(() => setBackendHealth(null));
 
       applyAllTableOrders(ordersRes.orders);
-      setWaiterCalls(waiterCallsRes.calls || []);
+      const latestCalls = waiterCallsRes.calls || [];
+      setWaiterCalls(latestCalls);
+      applyWaiterCalls(latestCalls);
       setProducts(productsRes.products);
       setTables(tablesRes.tables);
       setCategories(categoriesRes.categories);
@@ -171,28 +289,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   useEffect(() => {
     prepareOrderVoiceAnnouncements();
 
-    // Most browsers make their full voice list available after a user gesture.
-    // This listener never produces audio; it only prepares the feminine voice
-    // selection for later automatic incoming-order announcements.
-    const warmVoiceList = () => prepareOrderVoiceAnnouncements();
-    window.addEventListener('pointerdown', warmVoiceList, { once: true });
-    window.addEventListener('keydown', warmVoiceList, { once: true });
+    // Browsers only allow automatic audio after a user gesture. On the first
+    // click/keypress we unlock the Web Audio context (siren/chime) and warm the
+    // speech voice list — no sound plays, it just arms later automatic alerts.
+    const warmAudio = () => {
+      unlockAudio();
+      prepareOrderVoiceAnnouncements();
+    };
+    window.addEventListener('pointerdown', warmAudio);
+    window.addEventListener('keydown', warmAudio);
 
     fetchAllData(true);
 
     // Poll the all-table admin endpoint on the existing dashboard cadence.
     // Polling keeps this compatible with local file storage and serverless
-    // deployments while automatically catching orders from every table.
+    // deployments while automatically catching orders and waiter calls from
+    // every table.
     const interval = window.setInterval(() => {
       fetchAllData(false);
     }, 5_000);
 
     return () => {
       window.clearInterval(interval);
-      window.removeEventListener('pointerdown', warmVoiceList);
-      window.removeEventListener('keydown', warmVoiceList);
+      window.removeEventListener('pointerdown', warmAudio);
+      window.removeEventListener('keydown', warmAudio);
       stopOrderVoiceAnnouncements();
+      stopWaiterSiren();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const newOrdersCount = orders.filter((order) => order.status === 'new').length;
@@ -213,8 +337,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     <div className="min-h-screen bg-stone-100 flex flex-col">
       {/* Top Admin Navigation Header */}
       <header className="bg-stone-950 text-white border-b border-stone-800 sticky top-0 z-30 shadow-md">
-        {/* The existing alert area is now reserved for the spoken AI order message. */}
-        {isVoiceAnnouncementActive && (
+        {/* Loud, repeating waiter siren/buzzer alarm — rings until attended or stopped. */}
+        {waiterAlarmActive && (
+          <div className="bg-red-600 text-white px-4 py-2 text-xs font-black flex flex-wrap items-center justify-between gap-2 animate-pulse">
+            <div className="flex items-center gap-2">
+              <BellRing className="w-4 h-4 animate-bounce" />
+              <span>
+                🚨 SIREN: {waiterAlarmTables.length > 0 ? waiterAlarmTables.join(', ') : 'A table'} is
+                requesting a WAITER now!
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  stopWaiterAlarm();
+                  setActiveTab('waiter-calls');
+                }}
+                className="px-2.5 py-1 bg-white text-red-700 font-black rounded hover:bg-stone-100 transition-colors cursor-pointer text-[11px]"
+              >
+                Attend / Stop Siren
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Spoken AI voice announcement strip (orders + waiter calls). */}
+        {isVoiceAnnouncementActive && !waiterAlarmActive && (
           <div
             role="status"
             aria-live="polite"
@@ -233,8 +381,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         )}
 
-        {/* Waiter requests remain a visual panel notification; they do not play audio. */}
-        {!isVoiceAnnouncementActive && pendingCallsCount > 0 && (
+        {/* Visual panel notification for pending waiter calls (after siren is silenced). */}
+        {!waiterAlarmActive && pendingCallsCount > 0 && (
           <div
             onClick={() => setActiveTab('waiter-calls')}
             className="bg-amber-500 hover:bg-amber-600 text-stone-950 px-4 py-1.5 text-xs font-black flex items-center justify-between cursor-pointer transition-colors"
@@ -270,7 +418,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-2">
-            {/* Kept in the original header position so the dashboard layout stays unchanged. */}
+            {/* Test the natural AI order voice. */}
             <button
               type="button"
               onClick={handleTestVoice}
@@ -282,7 +430,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <span className="md:hidden">Voice</span>
             </button>
 
-            {/* Kept in the original header position; it now controls spoken order alerts only. */}
+            {/* Test the waiter siren / buzzer so staff can confirm it works. */}
+            <button
+              type="button"
+              onClick={handleTestSiren}
+              className="py-1.5 px-2.5 rounded-lg bg-red-950/80 hover:bg-red-900 border border-red-800 text-red-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+              title="Test waiter siren / buzzer"
+            >
+              <BellRing className="w-3.5 h-3.5 text-red-400" />
+              <span className="hidden md:inline">Test Siren</span>
+              <span className="md:hidden">Siren</span>
+            </button>
+
+            {/* Master sound switch: controls BOTH the AI voice and the siren/buzzer. */}
             <button
               type="button"
               onClick={() => setVoiceEnabled((enabled) => !enabled)}
@@ -291,8 +451,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   ? 'bg-orange-500/20 text-orange-400 border-orange-500/40'
                   : 'bg-stone-800 text-stone-500 border-stone-700'
               }`}
-              title={voiceEnabled ? 'AI order voice is ON' : 'AI order voice is MUTED'}
-              aria-label={voiceEnabled ? 'Mute AI order voice' : 'Enable AI order voice'}
+              title={voiceEnabled ? 'Sound alerts (voice + siren) are ON' : 'Sound alerts (voice + siren) are MUTED'}
+              aria-label={voiceEnabled ? 'Mute all sound alerts' : 'Enable all sound alerts'}
               aria-pressed={voiceEnabled}
             >
               {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}

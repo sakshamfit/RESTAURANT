@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Bell, CheckCircle2, Clock, MapPin, RefreshCw, AlertTriangle, Sparkles, Volume2, VolumeX } from 'lucide-react';
+import { Bell, CheckCircle2, Clock, RefreshCw, BellRing, Volume2 } from 'lucide-react';
 import { WaiterCall } from '../types';
 import { api } from '../services/api';
+import { playTestSiren, unlockAudio } from '../utils/alertSounds';
 
 interface AdminWaiterCallsProps {
   onRefreshParent?: () => void;
@@ -49,6 +50,14 @@ export const AdminWaiterCalls: React.FC<AdminWaiterCallsProps> = ({ onRefreshPar
   const pendingCalls = calls.filter((c) => c.status === 'pending');
   const displayedCalls = filter === 'pending' ? pendingCalls : calls;
 
+  const handleTestSiren = () => {
+    unlockAudio();
+    const started = playTestSiren();
+    if (!started) {
+      alert('Sound is not supported in this browser.');
+    }
+  };
+
   return (
     <div className="space-y-4">
       {/* Header Bar */}
@@ -72,7 +81,7 @@ export const AdminWaiterCalls: React.FC<AdminWaiterCallsProps> = ({ onRefreshPar
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <div className="flex bg-stone-100 p-1 rounded-xl border border-stone-200">
             <button
               onClick={() => setFilter('pending')}
@@ -96,6 +105,16 @@ export const AdminWaiterCalls: React.FC<AdminWaiterCallsProps> = ({ onRefreshPar
             </button>
           </div>
 
+          {/* Lets staff confirm the waiter buzzer/siren actually works. */}
+          <button
+            onClick={handleTestSiren}
+            className="py-2 px-3 bg-red-600 hover:bg-red-700 text-white rounded-xl border border-red-700 text-xs font-black flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+            title="Ring the waiter siren / buzzer for a few seconds to test it"
+          >
+            <BellRing className="w-4 h-4" />
+            <span>Test Siren</span>
+          </button>
+
           <button
             onClick={() => fetchCalls(true)}
             className="p-2 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded-xl border border-stone-200 transition-colors"
@@ -104,6 +123,35 @@ export const AdminWaiterCalls: React.FC<AdminWaiterCallsProps> = ({ onRefreshPar
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
           </button>
         </div>
+      </div>
+
+      {/* Live siren status strip — makes it obvious the buzzer is armed. */}
+      <div className="bg-white rounded-2xl border border-stone-200 px-4 py-3 flex flex-wrap items-center justify-between gap-3 shadow-xs">
+        <div className="flex items-center gap-2.5">
+          <span className="w-9 h-9 rounded-lg bg-red-50 text-red-600 flex items-center justify-center">
+            <BellRing className="w-4 h-4" />
+          </span>
+          <div>
+            <p className="text-xs font-extrabold text-stone-800 flex items-center gap-1.5">
+              Waiter Siren / Buzzer
+              <span className="inline-flex items-center gap-1 text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                ARMED
+              </span>
+            </p>
+            <p className="text-[11px] text-stone-500">
+              A loud alarm + AI voice announcement rings automatically the moment any table presses “Call Waiter”. It
+              keeps sounding until the table is marked attended.
+            </p>
+          </div>
+        </div>
+        <button
+          onClick={handleTestSiren}
+          className="py-2 px-3.5 bg-stone-900 hover:bg-stone-800 text-white rounded-xl text-xs font-black flex items-center gap-1.5 transition-colors cursor-pointer"
+        >
+          <Volume2 className="w-3.5 h-3.5 text-red-400" />
+          Test Buzzer
+        </button>
       </div>
 
       {/* Grid of Waiter Calls */}
