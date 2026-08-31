@@ -18,10 +18,9 @@ npm run dev          # http://localhost:3000  (dev server with hot reload)
 ```
 
 - Customer view (table QR target): `http://localhost:3000/order/<table-token>`
-- Staff console: `http://localhost:3000/admin` — login with the admin
-  password from `.env` (`ADMIN_PASSWORD`, default `9852120609@` for local
-  development). Change it from **Café Settings → Update Password** after
-  first login.
+- Staff console: `http://localhost:3000/admin` — login with the owner
+  password set in `.env` (`ADMIN_PASSWORD`, see `.env.example`). Change it
+  from **Café Settings → Update Password** after first login.
 
 Production:
 
