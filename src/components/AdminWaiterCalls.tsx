@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Bell, CheckCircle2, Clock, RefreshCw, BellRing, Volume2 } from 'lucide-react';
+import { Bell, CheckCircle2, Clock, RefreshCw } from 'lucide-react';
 import { WaiterCall } from '../types';
 import { api } from '../services/api';
-import { playTestSiren, unlockAudio } from '../utils/alertSounds';
 
 interface AdminWaiterCallsProps {
   onRefreshParent?: () => void;
@@ -50,13 +49,6 @@ export const AdminWaiterCalls: React.FC<AdminWaiterCallsProps> = ({ onRefreshPar
   const pendingCalls = calls.filter((c) => c.status === 'pending');
   const displayedCalls = filter === 'pending' ? pendingCalls : calls;
 
-  const handleTestSiren = () => {
-    unlockAudio();
-    const started = playTestSiren();
-    if (!started) {
-      alert('Sound is not supported in this browser.');
-    }
-  };
 
   return (
     <div className="space-y-4">
@@ -76,7 +68,8 @@ export const AdminWaiterCalls: React.FC<AdminWaiterCallsProps> = ({ onRefreshPar
               )}
             </h2>
             <p className="text-xs text-stone-500">
-              Instant alerts when customers press the "Call Waiter" button at their table.
+              A dashboard banner and a spoken announcement appear the moment a customer presses “Call
+              Waiter”. No repeating alarm tone is played.
             </p>
           </div>
         </div>
@@ -105,15 +98,6 @@ export const AdminWaiterCalls: React.FC<AdminWaiterCallsProps> = ({ onRefreshPar
             </button>
           </div>
 
-          {/* Lets staff confirm the waiter buzzer/siren actually works. */}
-          <button
-            onClick={handleTestSiren}
-            className="py-2 px-3 bg-red-600 hover:bg-red-700 text-white rounded-xl border border-red-700 text-xs font-black flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
-            title="Ring the waiter siren / buzzer for a few seconds to test it"
-          >
-            <BellRing className="w-4 h-4" />
-            <span>Test Siren</span>
-          </button>
 
           <button
             onClick={() => fetchCalls(true)}
@@ -125,33 +109,40 @@ export const AdminWaiterCalls: React.FC<AdminWaiterCallsProps> = ({ onRefreshPar
         </div>
       </div>
 
-      {/* Live siren status strip — makes it obvious the buzzer is armed. */}
+      {/* Live alert status strip — reflects the actual pending-call state. */}
       <div className="bg-white rounded-2xl border border-stone-200 px-4 py-3 flex flex-wrap items-center justify-between gap-3 shadow-xs">
         <div className="flex items-center gap-2.5">
-          <span className="w-9 h-9 rounded-lg bg-red-50 text-red-600 flex items-center justify-center">
-            <BellRing className="w-4 h-4" />
+          <span
+            className={`w-9 h-9 rounded-lg flex items-center justify-center ${
+              pendingCalls.length > 0 ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-600'
+            }`}
+          >
+            <Bell className="w-4 h-4" />
           </span>
           <div>
             <p className="text-xs font-extrabold text-stone-800 flex items-center gap-1.5">
-              Waiter Siren / Buzzer
-              <span className="inline-flex items-center gap-1 text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                ARMED
+              Waiter Alerts
+              <span
+                className={`inline-flex items-center gap-1 text-[10px] font-black px-1.5 py-0.5 rounded-full border ${
+                  pendingCalls.length > 0
+                    ? 'text-red-700 bg-red-50 border-red-200'
+                    : 'text-emerald-700 bg-emerald-50 border-emerald-200'
+                }`}
+              >
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    pendingCalls.length > 0 ? 'bg-red-500 animate-pulse' : 'bg-emerald-500'
+                  }`}
+                />
+                {pendingCalls.length > 0 ? `${pendingCalls.length} PENDING` : 'ALL ATTENDED'}
               </span>
             </p>
             <p className="text-[11px] text-stone-500">
-              A loud alarm + AI voice announcement rings automatically the moment any table presses “Call Waiter”. It
-              keeps sounding until the table is marked attended.
+              The dashboard polls this feed every 4 seconds. A banner and one spoken announcement are raised for each
+              new call; the banner clears when the table is marked attended.
             </p>
           </div>
         </div>
-        <button
-          onClick={handleTestSiren}
-          className="py-2 px-3.5 bg-stone-900 hover:bg-stone-800 text-white rounded-xl text-xs font-black flex items-center gap-1.5 transition-colors cursor-pointer"
-        >
-          <Volume2 className="w-3.5 h-3.5 text-red-400" />
-          Test Buzzer
-        </button>
       </div>
 
       {/* Grid of Waiter Calls */}

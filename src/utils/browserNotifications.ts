@@ -1,6 +1,6 @@
 /**
- * Visual/browser notifications only. Audible order feedback is handled by the
- * dedicated AI voice assistant in orderVoiceAnnouncements.ts.
+ * Visual/browser notifications only. Audible order feedback on the staff
+ * dashboard is handled by spokenAlerts.ts.
  */
 export function requestNotificationPermission(): void {
   if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {

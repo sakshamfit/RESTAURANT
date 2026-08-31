@@ -514,8 +514,8 @@ export function createApp() {
 
   app.get('/api/admin/orders', requireAdminAuth, async (req, res) => {
     try {
-      // `scope=all-tables` is the read-only feed used by the hotel dashboard's
-      // AI voice. It deliberately ignores status/table filters so Table 1,
+      // `scope=all-tables` is the read-only feed used by the admin dashboard's
+      // live order alerts. It deliberately ignores status/table filters so Table 1,
       // Table 2, Table 3, and every later table are all included. No request to
       // this endpoint can edit, remove, or recreate an order.
       let orders = await store.list('orders');

@@ -247,8 +247,8 @@ export default function App() {
         saveMyDeviceOrderId(res.order.id);
       }
 
-      // The customer still receives a browser notification, while audible order
-      // alerts are reserved for the hotel/admin AI voice assistant.
+      // The customer receives a browser notification; spoken order alerts are
+      // reserved for the staff dashboard.
       sendBrowserNotification(
         `${settings?.cafeName || 'Nagori Chai Point'} • Order Confirmed!`,
         `Order #${res.order.orderNumber} for ${table.name} received and sent to kitchen!`

@@ -1,6 +1,5 @@
 import express from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 // Explicit .js specifiers so this file also runs correctly as native ESM
 // ("type": "module") after a plain tsc/esbuild transpile without bundling.
@@ -12,6 +11,9 @@ dotenv.config();
 
 const app = createApp();
 const PORT = Number(process.env.PORT || 3000);
+// The packaged desktop app runs the server for one local window only, so it
+// binds 127.0.0.1 instead of every network interface.
+const HOST = process.env.HOST || '0.0.0.0';
 
 function pgUrlSafe() {
   // Hostname only — never log credentials.
@@ -26,6 +28,9 @@ async function startServer() {
   await initAdminAuth();
   await store.waitUntilReady();
   if (process.env.NODE_ENV !== 'production') {
+    // Imported lazily so a production bundle (web host or packaged desktop app)
+    // never needs Vite installed.
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -35,13 +40,17 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    // DIST_DIR lets the packaged desktop app point at its bundled assets;
+    // everywhere else the Vite build sits next to the server in ./dist.
+    const distPath = process.env.DIST_DIR
+      ? path.resolve(process.env.DIST_DIR)
+      : path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Nagori Chai Point server running on http://0.0.0.0:${PORT} (persistence: ${store.provider})`);
+  app.listen(PORT, HOST, () => {
+    console.log(`Nagori Chai Point server running on http://${HOST}:${PORT} (persistence: ${store.provider})`);
     if (store.provider === 'postgres') {
       console.log(`Persistence: direct Postgres via DATABASE_URL (${new URL(pgUrlSafe()).host}).`);
     } else {
