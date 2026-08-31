@@ -24,6 +24,17 @@ html, body {
   min-height: 100%;
 }
 
+/* Android Chrome fix: when the user scrolls to the top or bottom of the
+   customer menu, the page used to "rubber-band" — the bounce interferes
+   with the rest of the scroll gesture, so the user feels like the page
+   is stuck. `overscroll-behavior: contain` tells the browser to keep
+   the bounce to the page itself (or kill it entirely with `none`).
+   `contain` is the safer default because customers sometimes pull-to-refresh
+   on the address bar and we don't want to break that. */
+html, body {
+  overscroll-behavior-y: contain;
+}
+
 * {
   -webkit-tap-highlight-color: transparent;
 }
