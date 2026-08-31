@@ -1,7 +1,7 @@
 {
   "name": "nexoraosp-restaurant-desktop",
   "productName": "NEXORAOSP RESTAURANT",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "NEXORAOSP RESTAURANT desktop staff console: the restaurant's order server and admin dashboard in one installable app, with all data stored on this machine.",
   "main": "main.cjs",
@@ -38,8 +38,18 @@
     "compression": "maximum",
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "zip", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.png",
       "signAndEditExecutable": false
@@ -53,16 +63,37 @@
       "shortcutName": "NEXORAOSP RESTAURANT"
     },
     "mac": {
-      "target": [{ "target": "dmg", "arch": ["x64"] }],
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "category": "public.app-category.business",
       "icon": "build/icon.png"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "category": "Office",
       "maintainer": "NEXORAOSP RESTAURANT <admin@nexoraosp.com>",
       "synopsis": "Restaurant staff console: live orders, waiter calls and menu management",
       "icon": "build/icon.png"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "sakshamfit",
+        "repo": "RESTAURANT",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2"
   }
 }

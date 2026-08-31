@@ -28,6 +28,24 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+// Auto-update via electron-updater. The package reads its configuration
+// from the `build.publish` block in desktop/package.json — by default it
+// expects GitHub Releases under the same org/repo as the project. Set
+// `GH_TOKEN` in the build env to publish, and `autoUpdater` will
+// download new installers from the release page when the user runs
+// `Check for updates` from the Help menu.
+let autoUpdater = null;
+try {
+  ({ autoUpdater } = require('electron-updater'));
+  // Don't auto-install on quit unless the user OK'd it. Showing the
+  // update dialog is controlled by the renderer (see Console menu).
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = false;
+} catch (error) {
+  // electron-updater is an optional dep. Older self-built dev shells
+  // might not have it. Don't crash — just disable the menu entry.
+  console.warn('[desktop] electron-updater not available, auto-update disabled:', error?.message || error);
+}
 
 const APP_NAME = 'NEXORAOSP RESTAURANT';
 const WINDOW_TITLE = `${APP_NAME} — Staff Console`;
@@ -371,6 +389,11 @@ function buildMenu() {
           click: () => void restartServerAndReload(),
         },
         { type: 'separator' },
+        {
+          label: 'Check for updates',
+          click: () => void checkForUpdatesInteractive(),
+        },
+        { type: 'separator' },
         isMac ? { role: 'close' } : { role: 'quit' },
       ],
     },
@@ -405,6 +428,103 @@ ipcMain.handle('desktop:open-data-folder', async () => {
 });
 
 ipcMain.handle('desktop:machine-fingerprint', () => getMachineFingerprint());
+
+// ── Auto-update ────────────────────────────────────────────────────────────
+// Uses electron-updater. Configuration is read from desktop/package.json's
+//  block. When  is not present (dev builds
+// without electron-updater installed) every call is a no-op that returns
+// ok:false so the renderer can show "auto-update not available" cleanly.
+
+function safeUpdaterCall(fn) {
+  if (!autoUpdater) return Promise.resolve(null);
+  return Promise.resolve()
+    .then(() => fn())
+    .catch((error) => {
+      console.warn('[updater] error:', error?.message || error);
+      return null;
+    });
+}
+
+async function checkForUpdatesInteractive() {
+  if (!autoUpdater) {
+    await dialog.showMessageBox({
+      type: 'info',
+      title: APP_NAME,
+      message: 'Auto-update is not available in this build.',
+      detail: 'This usually means the desktop app was built without electron-updater. Reinstall the latest release from your download site.',
+    });
+    return;
+  }
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const update = result && (result.updateInfo || result);
+    if (update && update.version && update.version !== app.getVersion()) {
+      const releaseNotes = (update.releaseNotes && typeof update.releaseNotes === 'string')
+        ? update.releaseNotes
+        : 'A new version is available.';
+      const choice = await dialog.showMessageBox({
+        type: 'info',
+        title: 'Update available',
+        message: `Version ${update.version} is available (you have ${app.getVersion()}).`,
+        detail: releaseNotes,
+        buttons: ['Download and install', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      if (choice.response === 0) {
+        await autoUpdater.downloadUpdate();
+        const install = await dialog.showMessageBox({
+          type: 'question',
+          title: 'Restart to apply update',
+          message: 'The new version has been downloaded. Restart now?',
+          detail: 'The app will close, install the update, and reopen with your data intact.',
+          buttons: ['Restart now', 'On next launch'],
+          defaultId: 0,
+          cancelId: 1,
+        });
+        if (install.response === 0) {
+          // isForceRunAfter = true, restart immediately.
+          autoUpdater.quitAndInstall(false, true);
+        } else {
+          autoUpdater.autoInstallOnAppQuit = true;
+        }
+      }
+    } else {
+      await dialog.showMessageBox({
+        type: 'info',
+        title: APP_NAME,
+        message: `You're on the latest version (${app.getVersion()}).`,
+      });
+    }
+  } catch (error) {
+    await dialog.showMessageBox({
+      type: 'warning',
+      title: 'Update check failed',
+      message: 'Could not check for updates.',
+      detail: error?.message || String(error),
+    });
+  }
+}
+
+ipcMain.handle('desktop:check-for-updates', () => checkForUpdatesInteractive());
+
+ipcMain.handle('desktop:get-update-state', async () => {
+  if (!autoUpdater) {
+    return { available: false, reason: 'not-configured' };
+  }
+  try {
+    const result = await safeUpdaterCall(() => autoUpdater.checkForUpdates());
+    const update = result && (result.updateInfo || result);
+    if (!update || !update.version) return { available: false };
+    return {
+      available: update.version !== app.getVersion(),
+      currentVersion: app.getVersion(),
+      latestVersion: update.version,
+    };
+  } catch (error) {
+    return { available: false, reason: 'error', error: error?.message || String(error) };
+  }
+});
 
 // ── App bootstrap ───────────────────────────────────────────────────────────
 
@@ -444,6 +564,21 @@ if (!gotSingleInstanceLock) {
       await showStartupError(error);
       app.quit();
       return;
+    }
+
+    // Background update check: on startup and every 4 hours. Silent
+    // failures only — the renderer asks for the result via the
+    // bridge.getUpdateState() call when it boots.
+    if (autoUpdater) {
+      const silentCheck = () => {
+        autoUpdater.checkForUpdates().catch((error) => {
+          console.warn('[updater] background check failed:', error?.message || error);
+        });
+      };
+      // 5-second delay so the renderer has time to wire up its IPC
+      // listener before the first check resolves.
+      setTimeout(silentCheck, 5_000);
+      setInterval(silentCheck, 4 * 60 * 60 * 1000);
     }
 
     app.on('activate', () => {

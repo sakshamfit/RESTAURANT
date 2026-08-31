@@ -24,6 +24,14 @@ export interface NagoriDesktopBridge {
   openDataFolder: () => Promise<string>;
   /** Stable per-machine identifier used to bind a license. */
   getMachineFingerprint: () => Promise<string>;
+  /**
+   * Auto-update. `getUpdateState` returns a snapshot (no UI); the
+   * `checkForUpdates` call shows the same native dialog as the
+   * Console → Check for updates menu item, so the renderer can offer
+   * "Check for updates" buttons anywhere it wants.
+   */
+  getUpdateState: () => Promise<{ available: boolean; currentVersion?: string; latestVersion?: string; reason?: string; error?: string }>;
+  checkForUpdates: () => Promise<void>;
 }
 
 declare global {

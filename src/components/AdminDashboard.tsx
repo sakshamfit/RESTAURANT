@@ -13,6 +13,7 @@ import {
   VolumeX,
   BellRing,
   Star,
+  Download,
 } from 'lucide-react';
 import { Order, Product, CafeTable, CafeCategory, CafeSettings, WaiterCall } from '../types';
 import { api, BackendHealth } from '../services/api';
@@ -69,6 +70,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [waiterAlertActive, setWaiterAlertActive] = useState<boolean>(false);
   const [waiterAlertTables, setWaiterAlertTables] = useState<string[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [updateState, setUpdateState] = useState<{ available: boolean; currentVersion?: string; latestVersion?: string } | null>(null);
+  const bridge = (window as unknown as { nagoriBridge?: { getUpdateState?: () => Promise<{ available: boolean; currentVersion?: string; latestVersion?: string }>; checkForUpdates?: () => Promise<void> } }).nagoriBridge;
 
   // We identify incoming orders by their immutable ID, never by a count. That
   // means two tables ordering together are both announced, even if a staff
@@ -262,6 +265,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     window.addEventListener('keydown', warmAudio);
 
     fetchAllData(true);
+
+    // Auto-update check on the desktop build. Web customers see nothing.
+    // The bridge is only present when running inside Electron — wrap in
+    // a try so the web build is unaffected.
+    if (bridge && typeof bridge.getUpdateState === 'function') {
+      // Don't block the dashboard on this — it's a tiny network call.
+      void bridge.getUpdateState()
+        .then((s) => {
+          if (s && s.available) setUpdateState(s);
+        })
+        .catch(() => { /* ignore — feature unavailable */ });
+    }
 
     // Poll the all-table admin endpoint on the existing dashboard cadence.
     // Polling keeps this compatible with local file storage and serverless
@@ -463,6 +478,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           })}
         </div>
       </header>
+
+      {/* Update banner — only on the desktop app when electron-updater
+          reports a newer version. Offers a one-click "Restart and
+          update" via the Console menu. Self-hosted / web customers
+          see nothing. */}
+      {updateState && updateState.available && updateState.latestVersion && (
+        <div className="px-4 py-2.5 text-xs font-semibold border-b bg-sky-50 text-sky-900 border-sky-200 flex flex-wrap items-center gap-2">
+          <Download className="w-4 h-4 shrink-0" />
+          <span>
+            <strong>Update available.</strong> Version {updateState.latestVersion} is ready to install
+            (you have v{updateState.currentVersion || 'unknown'}).
+          </span>
+          <button
+            type="button"
+            onClick={() => bridge?.checkForUpdates?.()}
+            className="ml-auto px-3 py-1 rounded-md bg-sky-600 text-white font-bold hover:bg-sky-700 transition"
+          >
+            Restart and update
+          </button>
+        </div>
+      )}
 
       {/* Trial banner — only on distributed builds where the active
           license is a trial. Shows days remaining + Subscribe CTA. */}

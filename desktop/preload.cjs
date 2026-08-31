@@ -20,4 +20,12 @@ contextBridge.exposeInMainWorld('nagoriDesktop', {
    * on both the desktop app and the web.
    */
   getMachineFingerprint: () => ipcRenderer.invoke('desktop:machine-fingerprint'),
+  /**
+   * Auto-update. The main process owns the actual download + install
+   * flow (via electron-updater); the renderer just asks "is there an
+   * update?" or triggers the interactive "Check for updates" dialog
+   * (which also shows release notes and the restart prompt).
+   */
+  getUpdateState: () => ipcRenderer.invoke('desktop:get-update-state'),
+  checkForUpdates: () => ipcRenderer.invoke('desktop:check-for-updates'),
 });

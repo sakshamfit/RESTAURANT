@@ -15,6 +15,7 @@ import {
   FolderOpen,
   Key,
   RefreshCw,
+  Download,
   Copy,
   Calendar,
 } from 'lucide-react';
@@ -768,6 +769,38 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* App Updates — only meaningful on the desktop build. The web
+          app always shows the latest deployed version, so the section
+          is a no-op there (the button just does nothing). */}
+      {desktopInfo && (
+        <div className="bg-white rounded-3xl p-6 border border-stone-200 shadow-xs space-y-3">
+          <div className="flex items-center justify-between border-b border-stone-100 pb-3">
+            <div>
+              <h2 className="font-bold text-lg text-stone-900 flex items-center gap-2">
+                <Download className="w-5 h-5 text-sky-700" />
+                <span>App updates</span>
+              </h2>
+              <p className="text-xs text-stone-500 mt-0.5">
+                You are running v{desktopInfo.appVersion}.
+              </p>
+            </div>
+          </div>
+          <p className="text-xs text-stone-600">
+            The desktop app checks for updates on startup and every 4 hours.
+            When a new version is published, a banner appears at the top of the
+            dashboard with a one-click restart.
+          </p>
+          <button
+            type="button"
+            onClick={() => (window as unknown as { nagoriBridge?: { checkForUpdates?: () => Promise<void> } }).nagoriBridge?.checkForUpdates?.()}
+            className="px-4 py-2 rounded-lg bg-sky-600 text-white text-sm font-semibold hover:bg-sky-700 transition flex items-center gap-2"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Check for updates
+          </button>
         </div>
       )}
     </div>
