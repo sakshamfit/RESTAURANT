@@ -4,6 +4,7 @@ import { Order, OrderStatus, CafeSettings } from '../types';
 import { api } from '../services/api';
 import { sendBrowserNotification } from '../utils/browserNotifications';
 import { CustomerFeedbackCard } from './CustomerFeedbackCard';
+import { formatOrderDateTime } from '../utils/datetime';
 
 interface OrderStatusTrackerProps {
   orderId: string;
@@ -166,6 +167,10 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
           <div className="text-center">
             <h2 className="text-sm font-semibold text-white tracking-tight">Order #{order.orderNumber}</h2>
             <p className="text-[11px] text-[#e2d9d2] font-normal">{order.tableName} • {order.customerName}</p>
+            <p className="text-[10px] text-[#a8a29e] font-normal flex items-center justify-center gap-1 mt-0.5">
+              <Clock className="w-3 h-3" />
+              <span>Placed {formatOrderDateTime(order.timeline.createdAt)}</span>
+            </p>
           </div>
 
           <button
@@ -339,6 +344,13 @@ export const OrderStatusTracker: React.FC<OrderStatusTrackerProps> = ({
           </div>
 
           <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-[11px] text-[#78716c] pb-1.5 border-b border-[#faf8f5]">
+              <span className="inline-flex items-center gap-1 font-semibold">
+                <Clock className="w-3 h-3 text-[#ea580c]" />
+                Placed on
+              </span>
+              <span className="font-semibold text-[#292524]">{formatOrderDateTime(order.timeline.createdAt)}</span>
+            </div>
             {order.items.map((item) => (
               <div key={item.id} className="flex items-center justify-between text-xs py-1 border-b border-[#faf8f5]">
                 <div className="text-[#292524]">

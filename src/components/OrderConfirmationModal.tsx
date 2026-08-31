@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import confetti from 'canvas-confetti';
 import { CheckCircle2, Clock, MapPin, Receipt, ArrowRight } from 'lucide-react';
 import { Order, CafeSettings } from '../types';
+import { formatOrderDateTime } from '../utils/datetime';
 
 interface OrderConfirmationModalProps {
   order: Order;
@@ -74,11 +75,11 @@ export const OrderConfirmationModal: React.FC<OrderConfirmationModalProps> = ({
           </div>
 
           {/* Customer & Status */}
-          <div className="flex items-center justify-between text-xs py-2.5 px-3 bg-white rounded-md border border-[#e7e2dc]">
+          <div className="flex items-center justify-between gap-2 flex-wrap text-xs py-2.5 px-3 bg-white rounded-md border border-[#e7e2dc]">
             <span className="text-[#78716c]">Customer: <strong className="text-[#292524] font-semibold">{order.customerName}</strong></span>
             <span className="font-semibold text-emerald-700 flex items-center gap-1">
               <Clock className="w-3.5 h-3.5" />
-              <span>Received</span>
+              <span>Placed {formatOrderDateTime(order.timeline.createdAt)}</span>
             </span>
           </div>
 

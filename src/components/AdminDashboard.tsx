@@ -213,40 +213,69 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const spokenAlertsAvailable = isSpokenAlertSupported();
 
-  const fetchAllData = async (isInitial = false) => {
+  /**
+   * The live kitchen feed: only the two light endpoints that actually change
+   * minute-to-minute. This is what the 5-second poll hits — no product
+   * catalogue, no photos, so each tick stays small and fast.
+   */
+  const fetchLiveData = async () => {
     try {
-      if (isInitial) setLoading(true);
-
-      const [ordersRes, waiterCallsRes, productsRes, tablesRes, categoriesRes, settingsRes] = await Promise.all([
+      const [ordersRes, waiterCallsRes] = await Promise.all([
         // No table filter is sent here: this is the all-table source used for
         // live Table 1 / 2 / 3 (and future table) order detection.
         api.adminGetAllTableOrders(),
         api.adminGetWaiterCalls(),
-        api.adminGetProducts(),
-        api.adminGetTables(),
-        api.adminGetCategories(),
-        api.adminGetSettings(),
       ]);
-
-      // Backend storage health is informative only — never block the dashboard on it.
-      api
-        .getHealth()
-        .then((health) => setBackendHealth(health))
-        .catch(() => setBackendHealth(null));
 
       applyAllTableOrders(ordersRes.orders);
       const latestCalls = waiterCallsRes.calls || [];
       setWaiterCalls(latestCalls);
       applyWaiterCalls(latestCalls);
+    } catch (err: any) {
+      console.error('Failed to sync live order feed:', err);
+    }
+  };
+
+  /**
+   * Reference data (menu, tables, categories, settings) changes rarely, so it
+   * is refreshed every 30 seconds instead of on every 5-second tick.
+   * Re-downloading the whole catalogue (photos included) on every poll loaded
+   * the backend and made the dashboard feel laggy on busy services.
+   */
+  const fetchReferenceData = async (isInitial = false) => {
+    try {
+      if (isInitial) setLoading(true);
+      const [productsRes, tablesRes, categoriesRes, settingsRes] = await Promise.all([
+        api.adminGetProducts(),
+        api.adminGetTables(),
+        api.adminGetCategories(),
+        api.adminGetSettings(),
+      ]);
       setProducts(productsRes.products);
       setTables(tablesRes.tables);
       setCategories(categoriesRes.categories);
       setSettings(settingsRes.settings);
     } catch (err: any) {
-      console.error('Failed to sync admin data:', err);
+      console.error('Failed to sync dashboard data:', err);
     } finally {
       if (isInitial) setLoading(false);
     }
+  };
+
+  const refreshBackendHealth = () => {
+    // Backend storage health is informative only — never block the dashboard on it.
+    api
+      .getHealth()
+      .then((health) => setBackendHealth(health))
+      .catch(() => setBackendHealth(null));
+  };
+
+  /** Full sync — used on open and for manual refreshes after edits. */
+  const fetchAllData = async (isInitial = false) => {
+    if (isInitial) setLoading(true);
+    await Promise.all([fetchLiveData(), fetchReferenceData(false)]);
+    refreshBackendHealth();
+    if (isInitial) setLoading(false);
   };
 
   useEffect(() => {
@@ -263,16 +292,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     fetchAllData(true);
 
-    // Poll the all-table admin endpoint on the existing dashboard cadence.
     // Polling keeps this compatible with local file storage and serverless
     // deployments while automatically catching orders and waiter calls from
-    // every table.
-    const interval = window.setInterval(() => {
-      fetchAllData(false);
+    // every table. Split by how often data actually changes, so the backend is
+    // never busy re-serving the full catalogue on every tick:
+    //   - live kitchen feed (orders + waiter calls): every 5 seconds
+    //   - menu / tables / settings reference data:   every 30 seconds
+    //   - backend storage health:                    every 60 seconds
+    const liveInterval = window.setInterval(() => {
+      fetchLiveData();
     }, 5_000);
 
+    const referenceInterval = window.setInterval(() => {
+      fetchReferenceData(false);
+    }, 30_000);
+
+    const healthInterval = window.setInterval(refreshBackendHealth, 60_000);
+
     return () => {
-      window.clearInterval(interval);
+      window.clearInterval(liveInterval);
+      window.clearInterval(referenceInterval);
+      window.clearInterval(healthInterval);
       window.removeEventListener('pointerdown', warmAudio);
       window.removeEventListener('keydown', warmAudio);
       stopSpokenAlerts();

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ShoppingBag,
   X,
@@ -7,16 +7,18 @@ import {
   CheckCircle2,
   AlertCircle,
   ChefHat,
-  Receipt,
   UtensilsCrossed,
   ArrowRight,
   Radio,
   Smartphone,
   Star,
+  CalendarDays,
+  WifiOff,
 } from 'lucide-react';
 import { CafeTable, CafeSettings, Order } from '../types';
 import { api } from '../services/api';
 import { getMyDeviceOrderIds, getSubmittedFeedbackForOrder } from '../utils/deviceOrders';
+import { formatOrderDateTime } from '../utils/datetime';
 
 interface TableOrderHistoryModalProps {
   isOpen: boolean;
@@ -36,30 +38,76 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
   const [orders, setOrders] = useState<Order[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  // A background refresh failed but the last good list is still on screen —
+  // flagged with a subtle strip instead of blanking the modal with an error.
+  const [refreshFailed, setRefreshFailed] = useState<boolean>(false);
 
-  const fetchHistory = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const res = await api.getTableOrders(table.token);
-      const myDeviceOrderIds = getMyDeviceOrderIds();
+  // Mirror of `orders` so the polling loop never reads stale state.
+  const ordersRef = useRef<Order[]>([]);
+  const applyOrders = useCallback((next: Order[]) => {
+    ordersRef.current = next;
+    setOrders(next);
+  }, []);
 
-      // STRICT PHONE ISOLATION:
-      // Only display orders placed from THIS phone/device
-      const deviceOrders = (res.orders || []).filter((o) => myDeviceOrderIds.includes(o.id));
-      setOrders(deviceOrders);
-    } catch (err: any) {
-      setError(err?.message || 'Failed to load orders for this table.');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const fetchHistory = useCallback(
+    async (options?: { silent?: boolean }) => {
+      const silent = options?.silent === true;
+
+      // This phone has never placed an order: skip the network entirely and
+      // show the friendly empty state instantly (zero loading spinner).
+      const deviceOrderIds = getMyDeviceOrderIds();
+      if (deviceOrderIds.length === 0) {
+        applyOrders([]);
+        setError(null);
+        setRefreshFailed(false);
+        setLoading(false);
+        return;
+      }
+
+      if (!silent && ordersRef.current.length === 0) setLoading(true);
+      try {
+        let myOrders: Order[] = [];
+        try {
+          // Primary source: look the phone's own orders up by ID — works for
+          // every table the customer ever ordered from.
+          const res = await api.getMyOrdersByIds(deviceOrderIds);
+          myOrders = res.orders || [];
+        } catch {
+          // Fallback for an older backend without the lookup endpoint (or a
+          // hiccup on it): pull the current table's orders and keep only the
+          // ones placed from this device — the original behaviour.
+          const res = await api.getTableOrders(table.token);
+          myOrders = (res.orders || []).filter((o) => deviceOrderIds.includes(o.id));
+        }
+        applyOrders(myOrders);
+        setError(null);
+        setRefreshFailed(false);
+      } catch (err: any) {
+        if (ordersRef.current.length === 0) {
+          setError(err?.message || 'Failed to load your orders.');
+        } else {
+          // Keep showing the last good list; statuses just stop auto-updating.
+          setRefreshFailed(true);
+        }
+      } finally {
+        setLoading(false);
+      }
+    },
+    // `table` is only used by the fallback path, which needs its token.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [table?.token, applyOrders]
+  );
 
   useEffect(() => {
-    if (isOpen && table) {
-      fetchHistory();
-    }
-  }, [isOpen, table?.token]);
+    if (!isOpen || !table) return;
+    fetchHistory();
+    // Keep statuses live while the customer has the list open, without any
+    // manual refresh. Polling stops the moment the modal closes.
+    const interval = window.setInterval(() => {
+      fetchHistory({ silent: true });
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [isOpen, table?.token, fetchHistory]);
 
   if (!isOpen) return null;
 
@@ -114,21 +162,22 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
             <div>
               <h3 className="font-semibold text-sm text-white leading-tight flex items-center gap-2">
                 <span>My Orders</span>
-                <span className="bg-[#2c190e] text-[#fed7aa] border border-[#452c1e] text-[10px] px-2 py-0.2 rounded-full font-mono">
-                  {table.name}
+                <span className="bg-[#2c190e] text-[#fed7aa] border border-[#452c1e] text-[10px] px-2 py-0.2 rounded-full font-mono flex items-center gap-1">
+                  <Smartphone className="w-2.5 h-2.5" />
+                  This Phone
                 </span>
               </h3>
               <p className="text-[11px] text-[#e2d9d2]">
-                Orders placed from this device
+                Every order placed from this device, with its date
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-1.5">
             <button
-              onClick={fetchHistory}
+              onClick={() => fetchHistory()}
               disabled={loading}
-              className="p-1.5 text-[#fed7aa] hover:text-white rounded-md transition-colors cursor-pointer"
+              className="p-1.5 text-[#fed7aa] hover:text-white rounded-md transition-colors cursor-pointer disabled:opacity-60"
               title="Refresh orders"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
@@ -162,21 +211,34 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
             </div>
           )}
 
-          {error && (
+          {error && orders.length === 0 && (
             <div className="p-3 bg-red-50 border border-red-200 rounded-md text-red-700 text-xs flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
               <span>{error}</span>
+              <button
+                onClick={() => fetchHistory()}
+                className="ml-auto py-1 px-2.5 bg-red-600 hover:bg-red-700 text-white rounded font-semibold text-[11px] cursor-pointer transition-colors shrink-0"
+              >
+                Retry
+              </button>
             </div>
           )}
 
-          {!loading && orders.length === 0 && (
+          {refreshFailed && orders.length > 0 && (
+            <div className="p-2 bg-amber-50 border border-amber-200 rounded-md text-amber-800 text-[11px] flex items-center gap-2">
+              <WifiOff className="w-3.5 h-3.5 shrink-0" />
+              <span>Couldn't refresh just now — showing your latest saved orders. Pull the refresh button to retry.</span>
+            </div>
+          )}
+
+          {!loading && orders.length === 0 && !error && (
             <div className="py-12 text-center space-y-2 px-4">
               <div className="w-10 h-10 bg-white border border-[#e7e2dc] text-[#78716c] rounded-full flex items-center justify-center mx-auto">
                 <Smartphone className="w-5 h-5" />
               </div>
               <h4 className="font-semibold text-xs text-[#292524]">No Orders Yet</h4>
               <p className="text-xs text-[#78716c] max-w-xs mx-auto">
-                Orders placed from this phone will appear here so you can track them in real time.
+                Orders placed from this phone will appear here with their date so you can track them in real time.
               </p>
               <button
                 onClick={onClose}
@@ -196,18 +258,19 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
               }}
               className="bg-white border border-[#e7e2dc] hover:border-[#ea580c] rounded-md p-3.5 shadow-xs space-y-2.5 transition-all cursor-pointer group"
             >
-              {/* Top Row: Order ID & Status */}
+              {/* Top Row: Order ID, Table, Date & Status */}
               <div className="flex items-center justify-between gap-2 border-b border-[#faf8f5] pb-2">
-                <div>
-                  <div className="flex items-center gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="font-mono font-bold text-xs text-[#1e130c]">
                       {order.orderNumber}
                     </span>
-                    <span className="text-[10px] text-[#78716c]">
-                      {new Date(order.timeline.createdAt).toLocaleTimeString([], {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#faf8f5] border border-[#e7e2dc] text-[#78716c] font-semibold whitespace-nowrap">
+                      {order.tableName}
+                    </span>
+                    <span className="text-[10px] text-[#78716c] font-medium inline-flex items-center gap-1 whitespace-nowrap">
+                      <CalendarDays className="w-3 h-3 text-[#ea580c]" />
+                      {formatOrderDateTime(order.timeline.createdAt)}
                     </span>
                   </div>
                   <p className="text-[11px] text-[#78716c] mt-0.5">
@@ -215,7 +278,7 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
                   </p>
                 </div>
 
-                <div>{getStatusBadge(order.status)}</div>
+                <div className="shrink-0">{getStatusBadge(order.status)}</div>
               </div>
 
               {/* Items List */}
