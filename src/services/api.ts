@@ -130,6 +130,8 @@ export interface BackendHealth {
   lanUrls?: Array<{ url: string; address: string; interface: string }>;
   /** License state — null when licenses aren't enforced on this build. */
   licenseRequired?: boolean;
+  trialDays?: number;
+  trialAvailable?: boolean;
   license?: {
     state: 'not-required' | 'missing' | 'invalid' | 'expired' | 'active';
     reason?: string;
@@ -665,6 +667,15 @@ export const api = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Failed to change password.');
     }
+    return res.json();
+  },
+
+  /** Returns the most recent admin audit log entries. Newest first. */
+  async adminGetAudit(limit = 200): Promise<{ entries: Array<{ ts: string; admin: string; fingerprint: string; method: string; path: string }> }> {
+    const res = await fetchWithRetry(String.raw`${API_BASE}/admin/audit?limit=${Math.max(1, Math.min(1000, limit))}`, {
+      headers: { ...getAuthHeader() },
+    });
+    if (!res.ok) throw new Error('Failed to read audit log.');
     return res.json();
   },
 };

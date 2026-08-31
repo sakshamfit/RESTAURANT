@@ -1,6 +1,8 @@
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import dotenv from 'dotenv';
 // Type-only import + explicit .js specifier: keeps the emitted ESM import (if
 // any) resolvable after Vercel transpiles this file to native ESM.
@@ -29,12 +31,14 @@ import {
   activateLicense,
   deleteLicenseFile,
   getStoredPayload,
+  getTrialDays,
   heartbeat,
   isLicenseRequired,
   rebindLicense,
   verifyLicense,
   type LicenseStatus,
 } from './license.js';
+import { auditMiddleware } from './audit.js';
 
 dotenv.config();
 
@@ -240,9 +244,15 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
  * Returns a 402 with a structured payload so the UI can show the right
  * "activate / renew" screen instead of a generic error.
  */
-async function requireValidLicense(_req: Request, res: Response, next: NextFunction) {
+async function requireValidLicense(req: Request, res: Response, next: NextFunction) {
   if (!isLicenseRequired()) return next();
   const status = await verifyLicense();
+  // Make the active license payload (and the fingerprint baked into it)
+  // available to downstream middlewares so the audit log can watermark
+  // every admin action with the machine that performed it.
+  if (status.state === 'active') {
+    (req as Request & { licensePayload?: typeof status.payload }).licensePayload = status.payload;
+  }
   if (status.state === 'active' || status.state === 'not-required') return next();
   if (status.state === 'expired' && status.gracePeriodEndsAt) {
     // Still inside the 7-day grace window — let the admin keep working but
@@ -260,10 +270,13 @@ async function requireValidLicense(_req: Request, res: Response, next: NextFunct
 
 // Combined guard used by every admin route. Validates the license BEFORE
 // the admin session check so a banned/expired customer is told to renew
-// instead of being asked to log in.
-const requireAdmin: Array<typeof requireValidLicense | typeof requireAdminAuth> = [
+// instead of being asked to log in. The audit middleware sits at the end
+// of the chain so it can watermark state-changing admin requests with
+// the admin email + machine fingerprint.
+const requireAdmin: Array<typeof requireValidLicense | typeof requireAdminAuth | ReturnType<typeof auditMiddleware>> = [
   requireValidLicense,
   requireAdminAuth,
+  auditMiddleware(),
 ];
 
 async function sendWhatsAppNotification(order: Order, settings: CafeSettings): Promise<{ success: boolean; error?: string }> {
@@ -350,6 +363,8 @@ export function createApp() {
       // License state — null when licenses aren't enforced.
       licenseRequired: isLicenseRequired() || undefined,
       license: isLicenseRequired() ? licenseStatus : undefined,
+      trialDays: isLicenseRequired() ? getTrialDays() : undefined,
+      trialAvailable: isLicenseRequired() && getTrialDays() > 0,
       // Ops helpers: a very low uptime together with "connected" on every check
       // means requests keep landing on fresh cold starts; VERCEL_REGION shows
       // which datacenter served the request.
@@ -371,7 +386,15 @@ export function createApp() {
   app.get('/api/license/status', async (_req, res) => {
     try {
       const status = isLicenseRequired() ? await verifyLicense() : ({ state: 'not-required' } as LicenseStatus);
-      res.json({ licenseRequired: isLicenseRequired(), status });
+      res.json({
+        licenseRequired: isLicenseRequired(),
+        status,
+        // Trial info for the Setup Wizard. Only meaningful when licenses
+        // are required; included always so the renderer doesn't need to
+        // branch on licenseRequired.
+        trialDays: getTrialDays(),
+        trialAvailable: isLicenseRequired() && getTrialDays() > 0,
+      });
     } catch (error) {
       jsonError(res, 500, 'Unable to read license state.');
     }
@@ -409,6 +432,25 @@ export function createApp() {
       res.json(result);
     } catch (error: any) {
       jsonError(res, 500, error?.message || 'Heartbeat failed.');
+    }
+  });
+
+  // Explicitly start the trial. Idempotent: if a license (real or trial)
+  // already exists, the response reports the current state without
+  // creating a new trial. The renderer calls this when the user clicks
+  // the “Start free trial” button on the Setup Wizard.
+  app.post('/api/license/start-trial', async (_req, res) => {
+    try {
+      if (!isLicenseRequired()) {
+        return jsonError(res, 400, 'License is not required on this build — the trial is only for distributed builds.');
+      }
+      if (getTrialDays() <= 0) {
+        return jsonError(res, 400, 'No trial is offered on this build.');
+      }
+      const status = await verifyLicense();
+      res.json({ ok: true, trialDays: getTrialDays(), status });
+    } catch (error: any) {
+      jsonError(res, 500, error?.message || 'Could not start trial.');
     }
   });
 
@@ -957,6 +999,38 @@ export function createApp() {
     } catch (error: any) {
       console.error('Change password error:', error);
       jsonError(res, 500, error?.message || 'Failed to update the admin password.');
+    }
+  });
+
+  // Returns the most recent audit log entries. Newest first. The
+  // fingerprint watermark makes it possible to trace any leaked
+  // license back to the original machine.
+  app.get('/api/admin/audit', requireAdmin, async (req, res) => {
+    try {
+      const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+      const file = path.join(
+        process.env.DATA_DIR || (process.env.VERCEL ? '/tmp/restaurant-data' : path.join(process.cwd(), 'data')),
+        'audit.log',
+      );
+      let raw = '';
+      try {
+        raw = await fs.promises.readFile(file, 'utf8');
+      } catch {
+        // No audit log yet — return empty.
+        return res.json({ entries: [] });
+      }
+      // File is one JSON object per line; newest entries are at the end.
+      const lines = raw.split(String.fromCharCode(10)).filter((l) => l.trim());
+      const entries = lines
+        .slice(-limit)
+        .reverse()
+        .map((line) => {
+          try { return JSON.parse(line); } catch { return null; }
+        })
+        .filter(Boolean);
+      res.json({ entries });
+    } catch (error: any) {
+      jsonError(res, 500, error?.message || 'Could not read audit log.');
     }
   });
 

@@ -109,6 +109,8 @@ export interface LicenseStatusPayload {
 export interface LicenseStatusResponse {
   licenseRequired: boolean;
   status: LicenseStatusPayload;
+  trialDays: number;
+  trialAvailable: boolean;
 }
 
 export interface ActivateResponse {
@@ -223,4 +225,29 @@ export const licenseService = {
     }
     return res.json();
   },
+
+  /**
+   * Explicitly start a free trial. Idempotent: if a license (real or
+   * trial) already exists, the response reports the current state
+   * without creating a new trial. The Setup Wizard calls this when
+   * the user clicks "Start free trial".
+   */
+  async startTrial(): Promise<{ ok: boolean; trialDays: number; status: LicenseStatusPayload }> {
+    const res = await fetchWithRetry(`${API_BASE}/license/start-trial`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Could not start trial.');
+    }
+    return res.json();
+  },
 };
+
+/** One entry in the admin audit log. */
+export interface AuditEntry {
+  ts: string;
+  admin: string;
+  fingerprint: string;
+  method: string;
+  path: string;
+  [key: string]: unknown;
+}

@@ -67,6 +67,13 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
   const [rebindSuccess, setRebindSuccess] = useState<boolean>(false);
   const [heartbeatRunning, setHeartbeatRunning] = useState<boolean>(false);
   const [fingerprintCopied, setFingerprintCopied] = useState<boolean>(false);
+  const [auditOpen, setAuditOpen] = useState<boolean>(false);
+  const [auditEntries, setAuditEntries] = useState<Array<{ ts: string; admin: string; fingerprint: string; method: string; path: string }> | null>(null);
+
+  useEffect(() => {
+    if (!auditOpen || auditEntries !== null) return;
+    api.adminGetAudit(200).then((r) => setAuditEntries(r.entries)).catch(() => setAuditEntries([]));
+  }, [auditOpen, auditEntries]);
 
   const refreshLicense = React.useCallback(async () => {
     try {
@@ -603,6 +610,35 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
                     Transfer to a new computer
                   </button>
                 </p>
+                <p className="text-[10px] text-stone-500 mt-1">
+                  Need to investigate who changed what?{' '}
+                  <button
+                    onClick={() => setAuditOpen(!auditOpen)}
+                    className="text-amber-700 hover:underline font-bold"
+                  >
+                    {auditOpen ? 'Hide audit log' : 'View audit log'}
+                  </button>
+                </p>
+                {auditOpen && (
+                  <div className="mt-2 max-h-72 overflow-y-auto bg-stone-50 border border-stone-200 rounded-lg p-2 text-[10px] font-mono">
+                    {auditEntries === null ? (
+                      <p className="text-stone-500 px-2 py-1">Loading…</p>
+                    ) : auditEntries.length === 0 ? (
+                      <p className="text-stone-500 px-2 py-1">No audit entries yet.</p>
+                    ) : (
+                      auditEntries.map((entry, idx) => (
+                        <div key={idx} className="px-2 py-1 border-b border-stone-200 last:border-b-0">
+                          <span className="text-stone-400">{entry.ts}</span>{' '}
+                          <span className="text-amber-700">{entry.method}</span>{' '}
+                          <span className="text-stone-700">{entry.path}</span>
+                          <div className="text-stone-500 truncate">
+                            admin={entry.admin} · fp={entry.fingerprint}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}

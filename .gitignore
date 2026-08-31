@@ -11,6 +11,7 @@ coverage/
 data/*.json
 data/*.json.tmp
 data/.license-signing-secret
+data/audit.log
 api/index.cjs
 api/*.map
 api/*.tmp

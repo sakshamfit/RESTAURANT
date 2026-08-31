@@ -464,6 +464,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       </header>
 
+      {/* Trial banner — only on distributed builds where the active
+          license is a trial. Shows days remaining + Subscribe CTA. */}
+      {backendHealth?.license?.state === 'active' && backendHealth.license.payload?.plan === 'trial' && backendHealth.license.payload.exp && (
+        <div className="px-4 py-2.5 text-xs font-semibold border-b bg-emerald-50 text-emerald-900 border-emerald-200 flex flex-wrap items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-current animate-pulse shrink-0" />
+          <span>
+            <strong>Free trial.</strong> You have{' '}
+            {Math.max(0, Math.ceil((backendHealth.license.payload.exp - Date.now()) / (24 * 60 * 60 * 1000)))}{' '}
+            day{Math.max(0, Math.ceil((backendHealth.license.payload.exp - Date.now()) / (24 * 60 * 60 * 1000))) === 1 ? '' : 's'} left.
+            Subscribe to keep your data and the admin console.
+          </span>
+          <a
+            href="https://nexoraosp.com/subscribe"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] rounded-lg"
+          >
+            Subscribe now
+          </a>
+        </div>
+      )}
+
       {/* License warning banner — only shown in distributed builds where
           the subscription is expiring or has expired (still inside the
           7-day grace window). After grace, the admin login is blocked at

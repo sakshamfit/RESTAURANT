@@ -17,6 +17,12 @@ to Git (see `.gitignore`).
 - `.license-signing-secret` — only present in self-hosted builds that have
   `LICENSE_ALLOW_SELF_ISSUE=true`; the HS256 secret used to mint local keys
   for testing. Never used in distributed builds.
+- `audit.log` — only present in distributed builds; one JSON object per
+  line, recording every state-changing admin action (which admin, from
+  which machine, which endpoint). Use `tail -f data/audit.log` to watch
+  live, or the admin console → Subscription → "View audit log" link to
+  browse the last 200 entries. Read by support when investigating
+  license abuse or accidental changes.
 
 If `DATABASE_URL` is set in `.env`, app data moves to your own PostgreSQL
 database instead (see `db/README.md`); admin credentials always stay local.

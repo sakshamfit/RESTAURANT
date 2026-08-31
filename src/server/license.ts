@@ -29,6 +29,26 @@ import { readFile } from 'fs/promises';
 const LICENSE_REQUIRED = process.env.LICENSE_REQUIRED === 'true';
 const LICENSE_API_BASE = (process.env.LICENSE_API_BASE || 'https://license.nexoraosp.com').replace(/\/+$/, '');
 
+/**
+ * Length of the auto-issued trial license, in days. Set via
+ * `LICENSE_TRIAL_DAYS=14` in the distributed build's env. When
+ * `LICENSE_REQUIRED=true` and no license file is present, the app
+ * auto-mints a trial of this length on first launch — the user can
+ * keep using the admin console, with a "Subscribe now" banner showing
+ * the days remaining.
+ *
+ * Special values:
+ *   - `LICENSE_TRIAL_DAYS=0` → no trial offered; the user must
+ *     activate a real key immediately.
+ *   - `LICENSE_TRIAL_DAYS` unset → defaults to 14 days.
+ */
+const LICENSE_TRIAL_DAYS = (() => {
+  const raw = process.env.LICENSE_TRIAL_DAYS;
+  if (raw === undefined) return 14;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 14;
+})();
+
 function loadOrCreateSigningSecret(): string {
   const envSecret = process.env.LICENSE_SIGNING_SECRET;
   if (envSecret && envSecret.length >= 16) return envSecret;
@@ -188,7 +208,8 @@ function selfIssueLicense(req: ActivateRequest): { token: string; payload: Licen
 
 // ── License file I/O ────────────────────────────────────────────────────────
 
-interface StoredLicense {
+/** What's on disk in `license.json`. Exported for the /api/license/start-trial route. */
+export interface StoredLicense {
   /** The signed JWT. */
   token: string;
   /** Cached decoded payload, so we can render status offline. */
@@ -227,11 +248,51 @@ export async function deleteLicenseFile(): Promise<void> {
 
 // ── Verification (offline, signature + expiry) ──────────────────────────────
 
+/**
+ * Idempotently issue a trial license. Called from `verifyLicense()` when
+ * no license file exists and a trial is on offer. The trial is locked to
+ * the current machine (its fingerprint is whatever the caller passes, or
+ * a placeholder when called server-side without a fingerprint). Once
+ * written, subsequent calls are a no-op — the existing trial token is
+ * preserved so a user who reopens the app doesn't get a new 14-day clock
+ * each time.
+ */
+async function startTrial(fingerprint: string): Promise<StoredLicense | null> {
+  if (!LICENSE_REQUIRED || LICENSE_TRIAL_DAYS <= 0) return null;
+  const existing = await readLicenseFile();
+  if (existing) return existing; // Already activated or trialing — leave it alone.
+
+  const now = Date.now();
+  const payload: LicensePayload = {
+    keyId: 'TRIAL',
+    cafeName: 'My Café',
+    email: 'trial@local',
+    plan: 'trial',
+    iat: now,
+    exp: now + LICENSE_TRIAL_DAYS * 24 * 60 * 60 * 1000,
+    fingerprint,
+    activated: false,
+  };
+  const token = jwt.sign(payload, SIGNING_SECRET, { algorithm: 'HS256' });
+  const stored: StoredLicense = { token, payload, serverCheckedAt: null };
+  await writeLicenseFile(token, payload);
+  return stored;
+}
+
 export async function verifyLicense(): Promise<LicenseStatus> {
   if (!LICENSE_REQUIRED) return { state: 'not-required' };
 
-  const stored = await readLicenseFile();
-  if (!stored) return { state: 'missing' };
+  let stored = await readLicenseFile();
+  if (!stored) {
+    // No license yet — start a trial if one is offered. The fingerprint
+    // here is best-effort: server-side we don't have access to the
+    // desktop app's machine ID, so we record a placeholder. On the
+    // next /api/license/heartbeat (after the renderer reports the real
+    // fingerprint through /api/license/activate), the placeholder gets
+    // updated to the real one.
+    stored = await startTrial('server-' + crypto.randomBytes(4).toString('hex'));
+    if (!stored) return { state: 'missing' };
+  }
 
   let payload: LicensePayload;
   try {
@@ -249,7 +310,10 @@ export async function verifyLicense(): Promise<LicenseStatus> {
     const inGrace = Date.now() < gracePeriodEndsAt;
     return {
       state: 'expired',
-      reason: `Your ${payload.plan} subscription expired on ${new Date(payload.exp).toLocaleDateString()}.`,
+      reason:
+        payload.plan === 'trial'
+          ? `Your free trial ended on ${new Date(payload.exp).toLocaleDateString()}. Activate a license to keep using the admin console.`
+          : `Your ${payload.plan} subscription expired on ${new Date(payload.exp).toLocaleDateString()}.`,
       gracePeriodEndsAt: inGrace ? gracePeriodEndsAt : null,
     };
   }
@@ -356,6 +420,10 @@ export async function rebindLicense(req: RebindRequest): Promise<ActivateRespons
 
 export function isLicenseRequired(): boolean {
   return LICENSE_REQUIRED;
+}
+
+export function getTrialDays(): number {
+  return LICENSE_TRIAL_DAYS;
 }
 
 export async function getStoredPayload(): Promise<LicensePayload | null> {
