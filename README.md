@@ -1,4 +1,4 @@
-# Nagori Chai Point
+# NEXORAOSP RESTAURANT
 
 QR-based café food ordering with a complete staff console: live order tracking,
 permanent table QR codes, waiter-call alerts, customer reviews, sales reports
@@ -55,15 +55,29 @@ npm run desktop:build    # package installers into release/ (needs internet)
 
 `desktop:build` produces, per platform you run it on:
 
-- Windows: `nagori-chai-point-<ver>-win-x64.exe` (NSIS installer) + portable zip
-- Linux: `nagori-chai-point-<ver>-linux-x86_64.AppImage` + `.deb`
-- macOS: `nagori-chai-point-<ver>-mac-x64.dmg`
+- Windows: `nexoraosp-restaurant-<ver>-win-x64.exe` (NSIS installer) + portable zip
+- Linux: `nexoraosp-restaurant-<ver>-linux-x86_64.AppImage` + `.deb`
+- macOS: `nexoraosp-restaurant-<ver>-mac-x64.dmg`
 
 Packaging downloads the Electron toolchain, so it needs normal internet
 access. The repo ships a GitHub Actions workflow (`.github/workflows/
 desktop-release.yml`) that builds all three installers on GitHub runners and
 attaches them as artifacts — push a `v*` tag or use the Actions tab. See
 `desktop/README.md` for details.
+
+### No-Electron Linux package (optional)
+
+If you only need a lightweight Linux desktop launcher (no Electron, no
+downloads), run:
+
+```bash
+npm run desktop:linux   # → release/nexoraosp-restaurant-<ver>-linux-x64.tar.gz + .deb
+```
+
+The `.deb` (Debian/Ubuntu, `amd64`) installs a `NEXORAOSP RESTAURANT` app-menu
+entry that starts the local order server and opens the staff console in your
+browser. It requires Node.js 18+ on the machine; data is stored in
+`~/.nexoraosp-restaurant/data`.
 
 ## Deploying the web app
 
@@ -79,4 +93,5 @@ durable order history) and the exact behaviour of `/api/health`.
 | `npm start` | Run the production server |
 | `npm run lint` | `tsc --noEmit` type check |
 | `npm run desktop:stage` | Stage `desktop/app/` without packaging |
-| `npm run desktop:build` | Package desktop installers into `release/` |
+| `npm run desktop:build` | Package Electron desktop installers into `release/` |
+| `npm run desktop:linux` | Build the lightweight no-Electron Linux package (.deb + tar.gz) |

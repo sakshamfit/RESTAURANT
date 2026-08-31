@@ -11,7 +11,7 @@ import type {
 const createdAt = '2026-01-01T00:00:00.000Z';
 
 export const initialSettings: CafeSettings = {
-  cafeName: 'Nagori Chai Point',
+  cafeName: 'NEXORAOSP RESTAURANT',
   tagline: 'Authentic Chai, Fresh Snacks & Quick Bites',
   address: 'Near City Center, Main Road',
   phone: '+91 9852120609',
@@ -40,7 +40,7 @@ export const initialTables: CafeTable[] = Array.from({ length: 6 }, (_, index) =
     id: `tbl-${tableNumber}`,
     tableNumber,
     name: `Table ${tableNumber}`,
-    token: `nagori_tbl_tok_table${tableNumber}_${suffixes[index]}`,
+    token: `nexoraosp_tbl_tok_table${tableNumber}_${suffixes[index]}`,
     isActive: true,
     createdAt,
   };
@@ -50,7 +50,7 @@ export const initialProducts: Product[] = [
   {
     id: 'prod-tea',
     name: 'Special Masala Chai',
-    description: 'Nagori special kadak masala chai prepared with whole spices, fresh ginger, cardamom, and creamy milk.',
+    description: 'NEXORAOSP special kadak masala chai prepared with whole spices, fresh ginger, cardamom, and creamy milk.',
     category: 'Tea & Coffee',
     image: '',
     isAvailable: true,

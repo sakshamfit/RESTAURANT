@@ -374,7 +374,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="font-extrabold text-sm sm:text-base text-white tracking-tight leading-none">
-                  {settings?.cafeName || 'Nagori Chai Point'}
+                  {settings?.cafeName || 'NEXORAOSP RESTAURANT'}
                 </h1>
                 <span className="text-[10px] uppercase font-extrabold tracking-wider px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">
                   Admin

@@ -1,13 +1,13 @@
 {
-  "name": "nagori-chai-point-desktop",
-  "productName": "Nagori Chai Point",
+  "name": "nexoraosp-restaurant-desktop",
+  "productName": "NEXORAOSP RESTAURANT",
   "version": "1.0.0",
   "private": true,
-  "description": "Nagori Chai Point desktop staff console: the café's order server and admin dashboard in one installable app, with all data stored on this machine.",
+  "description": "NEXORAOSP RESTAURANT desktop staff console: the restaurant's order server and admin dashboard in one installable app, with all data stored on this machine.",
   "main": "main.cjs",
   "author": {
-    "name": "Nagori Chai Point",
-    "email": "admin@nagoritea.com"
+    "name": "NEXORAOSP RESTAURANT",
+    "email": "admin@nexoraosp.com"
   },
   "license": "UNLICENSED",
   "scripts": {
@@ -22,9 +22,9 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "com.nagorichaipoint.desktop",
-    "productName": "Nagori Chai Point",
-    "artifactName": "nagori-chai-point-${version}-${os}-${arch}.${ext}",
+    "appId": "com.nexoraosp.restaurant",
+    "productName": "NEXORAOSP RESTAURANT",
+    "artifactName": "nexoraosp-restaurant-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "../release",
       "buildResources": "build"
@@ -50,7 +50,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Nagori Chai Point"
+      "shortcutName": "NEXORAOSP RESTAURANT"
     },
     "mac": {
       "target": [{ "target": "dmg", "arch": ["x64"] }],
@@ -60,8 +60,8 @@
     "linux": {
       "target": ["AppImage", "deb"],
       "category": "Office",
-      "maintainer": "Nagori Chai Point <admin@nagoritea.com>",
-      "synopsis": "Café staff console: live orders, waiter calls and menu management",
+      "maintainer": "NEXORAOSP RESTAURANT <admin@nexoraosp.com>",
+      "synopsis": "Restaurant staff console: live orders, waiter calls and menu management",
       "icon": "build/icon.png"
     }
   }

@@ -26,8 +26,8 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
     setError(null);
 
     try {
-      await api.adminLogin('nagori Tea Point', password.trim());
-      onLoginSuccess('nagori Tea Point');
+      await api.adminLogin('NEXORAOSP RESTAURANT', password.trim());
+      onLoginSuccess('NEXORAOSP RESTAURANT');
     } catch (err: any) {
       setError(err?.message || 'Incorrect admin password. Please try again.');
     } finally {
@@ -61,7 +61,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
               Admin Account
             </span>
             <p className="text-sm font-bold text-[#1e130c] truncate">
-              nagori Tea Point
+              NEXORAOSP RESTAURANT
             </p>
           </div>
           <span className="text-[10px] font-bold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full border border-emerald-200">

@@ -1,5 +1,7 @@
 node_modules/
 build/
+!desktop/build/
+!desktop/build/icon.png
 dist/
 coverage/
 .DS_Store

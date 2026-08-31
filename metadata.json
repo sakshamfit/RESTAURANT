@@ -1,6 +1,6 @@
 {
-  "name": "Nagori Chai Point",
-  "description": "Production-ready QR-based café food ordering web app with permanent table QR codes, live order tracking, WhatsApp notification integration, waiter call alerts, customer reviews, and complete admin dashboard.",
+  "name": "NEXORAOSP RESTAURANT",
+  "description": "Production-ready QR-based restaurant food ordering web app with permanent table QR codes, live order tracking, WhatsApp notification integration, waiter call alerts, customer reviews, and complete admin dashboard.",
   "requestFramePermissions": [
     "camera"
   ]

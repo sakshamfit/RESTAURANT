@@ -249,7 +249,7 @@ export function createApp() {
     res.set('Cache-Control', 'no-store');
     res.json({
       status: 'ok',
-      app: 'Nagori Chai Point API',
+      app: 'NEXORAOSP RESTAURANT API',
       // Commit that produced this deploy, when running on Vercel.
       deploySha: process.env.VERCEL_GIT_COMMIT_SHA || null,
       persistence: diagnostics.provider,
@@ -660,7 +660,7 @@ export function createApp() {
       id: newId('tbl'),
       tableNumber,
       name: getIdentifier(req.body?.name) || `Table ${tableNumber}`,
-      token: `nagori_tbl_tok_table${tableNumber}_${crypto.randomBytes(6).toString('hex')}`,
+      token: `nexoraosp_tbl_tok_table${tableNumber}_${crypto.randomBytes(6).toString('hex')}`,
       isActive: true,
       createdAt: new Date().toISOString(),
     };
@@ -679,7 +679,7 @@ export function createApp() {
   app.patch('/api/admin/tables/:id/regenerate-token', requireAdminAuth, async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
-    const updated = { ...table, token: `nagori_tbl_tok_table${table.tableNumber}_${crypto.randomBytes(6).toString('hex')}` };
+    const updated = { ...table, token: `nexoraosp_tbl_tok_table${table.tableNumber}_${crypto.randomBytes(6).toString('hex')}` };
     await store.put('tables', updated);
     res.json({ success: true, table: updated });
   });

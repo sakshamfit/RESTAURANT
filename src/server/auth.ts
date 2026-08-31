@@ -10,7 +10,7 @@ dotenv.config();
 // credentials live in data/admin.json (scrypt-hashed), created on first start
 // from ADMIN_PASSWORD (or the built-in default). It can also be changed from
 // Admin → Café Settings → Update Password, which writes data/admin.json.
-const DEFAULT_ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@nagoritea.com';
+const DEFAULT_ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@nexoraosp.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim() || '';
 // Keep the documented development default for local use. Vercel deliberately
 // refuses admin logins until ADMIN_PASSWORD is configured (see below).

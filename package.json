@@ -1,5 +1,5 @@
 {
-  "name": "nagori-chai-point",
+  "name": "nexoraosp-restaurant",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -11,7 +11,8 @@
     "clean": "rm -rf dist server.js api/index.cjs api/*.map",
     "lint": "tsc --noEmit",
     "desktop:stage": "node scripts/build-desktop.mjs --stage-only",
-    "desktop:build": "node scripts/build-desktop.mjs"
+    "desktop:build": "node scripts/build-desktop.mjs",
+    "desktop:linux": "node scripts/build-linux-portable.mjs"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
@@ -40,5 +41,5 @@
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
   },
-  "description": "QR-based caf\u00e9 food ordering with live order tracking, waiter call alerts, customer reviews and a full admin dashboard. Ships as a web app and an installable desktop console."
+  "description": "QR-based restaurant food ordering with live order tracking, waiter call alerts, customer reviews and a full admin dashboard. Ships as a web app and an installable desktop console."
 }

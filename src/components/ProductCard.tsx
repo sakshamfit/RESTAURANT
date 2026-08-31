@@ -83,7 +83,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
                 {product.name}
               </span>
               <span className="text-[9px] font-medium text-[#78716c] uppercase tracking-wider">
-                Nagori Chai Point Special
+                NEXORAOSP RESTAURANT Special
               </span>
             </div>
           )}

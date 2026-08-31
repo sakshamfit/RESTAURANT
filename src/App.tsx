@@ -43,7 +43,7 @@ export default function App() {
 
   // Customer Table & Menu State
   const [activeTableToken, setActiveTableToken] = useState<string>(() => {
-    return localStorage.getItem('nagori_scanned_table_token') || 'nagori_tbl_tok_table1_9a2f7c';
+    return localStorage.getItem('nagori_scanned_table_token') || 'nexoraosp_tbl_tok_table1_9a2f7c';
   });
   const [table, setTable] = useState<CafeTable | null>(null);
   const [settings, setSettings] = useState<CafeSettings | null>(null);
@@ -148,12 +148,12 @@ export default function App() {
     } catch {
       // Fallback
       setAvailableTables([
-        { id: 'tbl-1', tableNumber: 1, name: 'Table 1', token: 'nagori_tbl_tok_table1_9a2f7c', isActive: true, createdAt: '' },
-        { id: 'tbl-2', tableNumber: 2, name: 'Table 2', token: 'nagori_tbl_tok_table2_4b8e1d', isActive: true, createdAt: '' },
-        { id: 'tbl-3', tableNumber: 3, name: 'Table 3', token: 'nagori_tbl_tok_table3_7c3a9f', isActive: true, createdAt: '' },
-        { id: 'tbl-4', tableNumber: 4, name: 'Table 4', token: 'nagori_tbl_tok_table4_1f5e8b', isActive: true, createdAt: '' },
-        { id: 'tbl-5', tableNumber: 5, name: 'Table 5', token: 'nagori_tbl_tok_table5_3d6a2c', isActive: true, createdAt: '' },
-        { id: 'tbl-6', tableNumber: 6, name: 'Table 6', token: 'nagori_tbl_tok_table6_8e0b4f', isActive: true, createdAt: '' },
+        { id: 'tbl-1', tableNumber: 1, name: 'Table 1', token: 'nexoraosp_tbl_tok_table1_9a2f7c', isActive: true, createdAt: '' },
+        { id: 'tbl-2', tableNumber: 2, name: 'Table 2', token: 'nexoraosp_tbl_tok_table2_4b8e1d', isActive: true, createdAt: '' },
+        { id: 'tbl-3', tableNumber: 3, name: 'Table 3', token: 'nexoraosp_tbl_tok_table3_7c3a9f', isActive: true, createdAt: '' },
+        { id: 'tbl-4', tableNumber: 4, name: 'Table 4', token: 'nexoraosp_tbl_tok_table4_1f5e8b', isActive: true, createdAt: '' },
+        { id: 'tbl-5', tableNumber: 5, name: 'Table 5', token: 'nexoraosp_tbl_tok_table5_3d6a2c', isActive: true, createdAt: '' },
+        { id: 'tbl-6', tableNumber: 6, name: 'Table 6', token: 'nexoraosp_tbl_tok_table6_8e0b4f', isActive: true, createdAt: '' },
       ]);
     }
   };
@@ -250,7 +250,7 @@ export default function App() {
       // The customer receives a browser notification; spoken order alerts are
       // reserved for the staff dashboard.
       sendBrowserNotification(
-        `${settings?.cafeName || 'Nagori Chai Point'} • Order Confirmed!`,
+        `${settings?.cafeName || 'NEXORAOSP RESTAURANT'} • Order Confirmed!`,
         `Order #${res.order.orderNumber} for ${table.name} received and sent to kitchen!`
       );
     } finally {
@@ -279,7 +279,7 @@ export default function App() {
       <div className="min-h-screen bg-stone-900 flex items-center justify-center p-4">
         <div className="text-center space-y-3 text-white">
           <div className="w-10 h-10 border-3 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto" />
-          <p className="text-xs font-semibold text-stone-400">Initializing Nagori Tea Point...</p>
+          <p className="text-xs font-semibold text-stone-400">Initializing NEXORAOSP RESTAURANT...</p>
         </div>
       </div>
     );
@@ -339,7 +339,7 @@ export default function App() {
         onOpenCart={() => setIsCartOpen(true)}
         isAdmin={false}
         onToggleAdmin={handleAdminToggle}
-        cafeName={settings?.cafeName || 'Nagori Tea Point'}
+        cafeName={settings?.cafeName || 'NEXORAOSP RESTAURANT'}
         onOpenTableSelect={() => setIsQRScannerOpen(true)}
         onOpenQRScanner={() => setIsQRScannerOpen(true)}
         onOpenOrderHistory={() => setIsTableOrderHistoryOpen(true)}

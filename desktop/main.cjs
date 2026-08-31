@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Nagori Chai Point — desktop staff console.
+ * NEXORAOSP RESTAURANT — desktop staff console.
  *
  * The desktop app is a thin, hardened Electron shell around the same Express
  * server that powers the web deployment:
@@ -24,7 +24,7 @@ const net = require('net');
 const path = require('path');
 const fs = require('fs');
 
-const APP_NAME = 'Nagori Chai Point';
+const APP_NAME = 'NEXORAOSP RESTAURANT';
 const WINDOW_TITLE = `${APP_NAME} — Staff Console`;
 const SERVER_READY_TIMEOUT_MS = 30000;
 const SERVER_POLL_MS = 250;
@@ -318,7 +318,7 @@ if (!gotSingleInstanceLock) {
     app.setAboutPanelOptions({
       applicationName: APP_NAME,
       applicationVersion: app.getVersion(),
-      copyright: 'Nagori Chai Point',
+      copyright: 'NEXORAOSP RESTAURANT',
     });
     buildMenu();
 
