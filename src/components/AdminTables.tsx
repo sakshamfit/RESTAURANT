@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Plus, QrCode, Printer, ExternalLink, Power, Trash2, RefreshCw, AlertCircle, Coffee } from 'lucide-react';
 import { CafeTable, Order, CafeSettings } from '../types';
 import { api } from '../services/api';
 import { QRPrintModal } from './QRPrintModal';
+import type { NagoriDesktopInfo } from '../desktop';
 
 interface AdminTablesProps {
   tables: (CafeTable & { activeOrder?: Order | null })[];
@@ -21,6 +22,26 @@ export const AdminTables: React.FC<AdminTablesProps> = ({
   const [newTableName, setNewTableName] = useState<string>(`Table ${tables.length + 1}`);
   const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  // On the desktop app, "Open Menu" must point at the staff machine's LAN
+  // address — a customer phone on the same Wi-Fi can reach that, while the
+  // staff window's loopback URL is invisible to other devices.
+  const [desktopInfo, setDesktopInfo] = useState<NagoriDesktopInfo | null>(null);
+  useEffect(() => {
+    if (!window.nagoriDesktop?.isDesktop) return;
+    window.nagoriDesktop
+      .getInfo()
+      .then((info) => setDesktopInfo(info))
+      .catch(() => setDesktopInfo(null));
+  }, []);
+
+  const customerMenuUrl = (token: string): string => {
+    if (desktopInfo) {
+      const lan = desktopInfo.lanUrls?.[0]?.url;
+      if (lan) return `${lan}/order/${token}`;
+      return `${desktopInfo.localUrl || ''}/order/${token}`;
+    }
+    return `/order/${token}`;
+  };
 
   const handleAddTable = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -183,7 +204,7 @@ export const AdminTables: React.FC<AdminTablesProps> = ({
                   </button>
 
                   <a
-                    href={`/order/${table.token}`}
+                    href={customerMenuUrl(table.token)}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="py-2 px-3 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded-xl text-xs font-semibold flex items-center justify-center gap-1 transition-colors"

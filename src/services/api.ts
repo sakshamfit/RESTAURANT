@@ -122,6 +122,31 @@ export interface BackendHealth {
   };
   dataFile?: string;
   ephemeral?: boolean;
+  /** True when the request is being served by the packaged desktop app. */
+  isDesktop?: boolean;
+  /** Loopback URL the staff console window was loaded from (desktop only). */
+  localUrl?: string | null;
+  /** Every LAN IPv4 the desktop server is also listening on. */
+  lanUrls?: Array<{ url: string; address: string; interface: string }>;
+  /** License state — null when licenses aren't enforced on this build. */
+  licenseRequired?: boolean;
+  trialDays?: number;
+  trialAvailable?: boolean;
+  license?: {
+    state: 'not-required' | 'missing' | 'invalid' | 'expired' | 'active';
+    reason?: string;
+    gracePeriodEndsAt?: number | null;
+    payload?: {
+      keyId: string;
+      cafeName: string;
+      email: string;
+      plan: string;
+      iat: number;
+      exp: number | null;
+      fingerprint: string;
+      activated: boolean;
+    };
+  };
   /** Process uptime — near-zero on every check means requests keep cold-starting. */
   nodeUptimeSeconds?: number;
   /** Vercel region that served the request (e.g. "iad1"), when deployed there. */
@@ -663,6 +688,15 @@ export const api = {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Failed to change password.');
     }
+    return res.json();
+  },
+
+  /** Returns the most recent admin audit log entries. Newest first. */
+  async adminGetAudit(limit = 200): Promise<{ entries: Array<{ ts: string; admin: string; fingerprint: string; method: string; path: string }> }> {
+    const res = await fetchWithRetry(String.raw`${API_BASE}/admin/audit?limit=${Math.max(1, Math.min(1000, limit))}`, {
+      headers: { ...getAuthHeader() },
+    });
+    if (!res.ok) throw new Error('Failed to read audit log.');
     return res.json();
   },
 };

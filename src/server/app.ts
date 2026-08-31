@@ -1,6 +1,8 @@
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import dotenv from 'dotenv';
 // Type-only import + explicit .js specifier: keeps the emitted ESM import (if
 // any) resolvable after Vercel transpiles this file to native ESM.
@@ -26,6 +28,18 @@ import {
   getAdminSessionSecret,
   verifyAdminPassword,
 } from './auth.js';
+import {
+  activateLicense,
+  deleteLicenseFile,
+  getStoredPayload,
+  getTrialDays,
+  heartbeat,
+  isLicenseRequired,
+  rebindLicense,
+  verifyLicense,
+  type LicenseStatus,
+} from './license.js';
+import { auditMiddleware } from './audit.js';
 
 dotenv.config();
 
@@ -249,6 +263,50 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+// In distributed builds (LICENSE_REQUIRED=true), every admin route
+// must also pass a license check. The license payload is attached to
+// the request so the audit middleware (and any handler that wants
+// the customer's plan / cafe name) can read it without a second
+// verifyLicense() round-trip.
+async function requireValidLicense(
+  req: Request & { licensePayload?: import('./license.js').LicensePayload },
+  res: Response,
+  next: NextFunction,
+) {
+  if (!isLicenseRequired()) return next();
+  const status = await verifyLicense();
+  if (status.state === 'active') {
+    req.licensePayload = status.payload;
+    return next();
+  }
+  if (status.state === 'not-required') return next();
+  if (status.state === 'expired' && status.gracePeriodEndsAt) {
+    res.setHeader('X-License-State', 'expired-grace');
+    res.setHeader('X-License-Grace-Ends-At', String(status.gracePeriodEndsAt));
+    return next();
+  }
+  res.status(402).json({
+    error: 'License required',
+    license: status,
+    action: status.state === 'missing' ? 'activate' : 'renew',
+  });
+}
+
+// Combined guard used by every admin route. License check first so
+// an expired/banned customer is told to renew instead of being asked
+// to log in. Audit middleware runs last so it can watermark every
+// state-changing request with the admin email + machine fingerprint.
+// Combined guard used by every admin route. License check first so
+// an expired/banned customer is told to renew instead of being asked
+// to log in. Audit middleware runs last so it can watermark every
+// state-changing request with the admin email + machine fingerprint.
+type AdminGuard = (req: Request, res: Response, next: NextFunction) => unknown;
+const requireAdmin: AdminGuard[] = [
+  requireValidLicense as AdminGuard,
+  requireAdminAuth as AdminGuard,
+  auditMiddleware() as AdminGuard,
+];
+
 async function sendWhatsAppNotification(order: Order, settings: CafeSettings): Promise<{ success: boolean; error?: string }> {
   if (!settings.enableWhatsAppAlerts || !settings.whatsappNumber) {
     return { success: false, error: 'WhatsApp alerts disabled or phone not set' };
@@ -298,9 +356,22 @@ export function createApp() {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-  app.get('/api/health', (_req, res) => {
+  app.get('/api/health', asyncRoute(async (_req, res) => {
     const diagnostics = store.getDiagnostics();
     res.set('Cache-Control', 'no-store');
+    const licenseRequired = isLicenseRequired();
+    let licenseState: LicenseStatus | null = null;
+    if (licenseRequired) {
+      // Best-effort: never let a license hiccup fail the health
+      // endpoint. The renderer treats `licenseRequired: true` +
+      // missing `license` as "wizard must run" and shows the
+      // setup flow.
+      try {
+        licenseState = await verifyLicense();
+      } catch {
+        licenseState = { state: 'invalid', reason: 'license check failed' };
+      }
+    }
     res.json({
       status: 'ok',
       app: 'NEXORAOSP RESTAURANT API',
@@ -320,6 +391,13 @@ export function createApp() {
         : undefined,
       dataFile: diagnostics.dataFile,
       ephemeral: diagnostics.ephemeral,
+      // License gate. Only present in distributed builds; the
+      // renderer treats `licenseRequired: false` as "self-hosted,
+      // no gate".
+      licenseRequired,
+      ...(licenseState ? { license: licenseState } : {}),
+      trialDays: licenseRequired ? getTrialDays() : undefined,
+      trialAvailable: licenseRequired && getTrialDays() > 0,
       // Ops helpers: a very low uptime together with "connected" on every check
       // means requests keep landing on fresh cold starts; VERCEL_REGION shows
       // which datacenter served the request.
@@ -327,7 +405,7 @@ export function createApp() {
       region: process.env.VERCEL_REGION || null,
       timestamp: new Date().toISOString(),
     });
-  });
+  }));
 
   // ----------------------------------------------------
   // Public customer APIs
@@ -601,17 +679,17 @@ export function createApp() {
     });
   }));
 
-  app.get('/api/admin/me', requireAdminAuth, asyncRoute(async (req: Request & { adminUser?: { email?: string } }, res) => {
+  app.get('/api/admin/me', requireAdmin, asyncRoute(async (req: Request & { adminUser?: { email?: string } }, res) => {
     res.json({ email: req.adminUser?.email || adminEmail, cafeName: (await store.getSettings()).cafeName });
   }));
 
   // Sessions are stateless (signed tokens), so logging out is a client-side
   // token removal; the token itself simply expires after its 7-day lifetime.
-  app.post('/api/admin/logout', requireAdminAuth, (_req, res) => {
+  app.post('/api/admin/logout', requireAdmin, (_req, res) => {
     res.json({ success: true });
   });
 
-  app.get('/api/admin/orders', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.get('/api/admin/orders', requireAdmin, asyncRoute(async (req, res) => {
     try {
       // `scope=all-tables` is the read-only feed used by the admin dashboard's
       // live order alerts. It deliberately ignores status/table filters so Table 1,
@@ -632,7 +710,7 @@ export function createApp() {
     }
   }));
 
-  app.patch('/api/admin/orders/:id/status', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.patch('/api/admin/orders/:id/status', requireAdmin, asyncRoute(async (req, res) => {
     try {
       const order = await store.get('orders', req.params.id);
       if (!order) return jsonError(res, 404, 'Order not found.');
@@ -654,7 +732,7 @@ export function createApp() {
     }
   }));
 
-  app.patch('/api/admin/orders/:id/payment', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.patch('/api/admin/orders/:id/payment', requireAdmin, asyncRoute(async (req, res) => {
     try {
       const order = await store.get('orders', req.params.id);
       if (!order) return jsonError(res, 404, 'Order not found.');
@@ -688,12 +766,12 @@ export function createApp() {
     res.send(bytes);
   }));
 
-  app.get('/api/admin/products', requireAdminAuth, asyncRoute(async (_req, res) => {
+  app.get('/api/admin/products', requireAdmin, asyncRoute(async (_req, res) => {
     const products = (await store.list('products')).sort((a, b) => a.displayOrder - b.displayOrder);
     res.json({ products: products.map((product) => ({ ...product, image: productImageUrl(product) })) });
   }));
 
-  app.post('/api/admin/products', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.post('/api/admin/products', requireAdmin, asyncRoute(async (req, res) => {
     try {
       const body = req.body || {};
       const timestamp = new Date().toISOString();
@@ -722,7 +800,7 @@ export function createApp() {
     }
   }));
 
-  app.put('/api/admin/products/:id', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.put('/api/admin/products/:id', requireAdmin, asyncRoute(async (req, res) => {
     try {
       const existing = await store.get('products', req.params.id);
       if (!existing) return jsonError(res, 404, 'Product not found.');
@@ -749,7 +827,7 @@ export function createApp() {
     }
   }));
 
-  app.patch('/api/admin/products/:id/availability', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.patch('/api/admin/products/:id/availability', requireAdmin, asyncRoute(async (req, res) => {
     const product = await store.get('products', req.params.id);
     if (!product) return jsonError(res, 404, 'Product not found.');
     const updated = { ...product, isAvailable: !product.isAvailable, updatedAt: new Date().toISOString() };
@@ -757,14 +835,14 @@ export function createApp() {
     res.json({ success: true, product: { ...updated, image: productImageUrl(updated) } });
   }));
 
-  app.delete('/api/admin/products/:id', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.delete('/api/admin/products/:id', requireAdmin, asyncRoute(async (req, res) => {
     const product = await store.get('products', req.params.id);
     if (!product) return jsonError(res, 404, 'Product not found.');
     await store.remove('products', req.params.id);
     res.json({ success: true });
   }));
 
-  app.get('/api/admin/tables', requireAdminAuth, asyncRoute(async (_req, res) => {
+  app.get('/api/admin/tables', requireAdmin, asyncRoute(async (_req, res) => {
     const snapshot = await store.snapshot();
     const tables = snapshot.tables.map((table) => ({
       ...table,
@@ -773,7 +851,7 @@ export function createApp() {
     res.json({ tables });
   }));
 
-  app.post('/api/admin/tables', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.post('/api/admin/tables', requireAdmin, asyncRoute(async (req, res) => {
     const tableNumber = Number(req.body?.tableNumber);
     if (!Number.isFinite(tableNumber) || tableNumber <= 0) return jsonError(res, 400, 'Valid table number is required.');
     const tables = await store.list('tables');
@@ -790,7 +868,7 @@ export function createApp() {
     res.status(201).json({ success: true, table });
   }));
 
-  app.patch('/api/admin/tables/:id/toggle', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.patch('/api/admin/tables/:id/toggle', requireAdmin, asyncRoute(async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     const updated = { ...table, isActive: !table.isActive };
@@ -798,7 +876,7 @@ export function createApp() {
     res.json({ success: true, table: updated });
   }));
 
-  app.patch('/api/admin/tables/:id/regenerate-token', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.patch('/api/admin/tables/:id/regenerate-token', requireAdmin, asyncRoute(async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     const updated = { ...table, token: `nexoraosp_tbl_tok_table${table.tableNumber}_${crypto.randomBytes(6).toString('hex')}` };
@@ -806,18 +884,18 @@ export function createApp() {
     res.json({ success: true, table: updated });
   }));
 
-  app.delete('/api/admin/tables/:id', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.delete('/api/admin/tables/:id', requireAdmin, asyncRoute(async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     await store.remove('tables', req.params.id);
     res.json({ success: true });
   }));
 
-  app.get('/api/admin/categories', requireAdminAuth, asyncRoute(async (_req, res) => {
+  app.get('/api/admin/categories', requireAdmin, asyncRoute(async (_req, res) => {
     res.json({ categories: (await store.list('categories')).sort((a, b) => a.displayOrder - b.displayOrder) });
   }));
 
-  app.post('/api/admin/categories', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.post('/api/admin/categories', requireAdmin, asyncRoute(async (req, res) => {
     const name = getIdentifier(req.body?.name);
     if (!name) return jsonError(res, 400, 'Category name is required.');
     const categories = await store.list('categories');
@@ -826,7 +904,7 @@ export function createApp() {
     res.status(201).json({ success: true, category });
   }));
 
-  app.put('/api/admin/categories/:id', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.put('/api/admin/categories/:id', requireAdmin, asyncRoute(async (req, res) => {
     const name = getIdentifier(req.body?.name);
     if (!name) return jsonError(res, 400, 'Valid category name is required.');
     const category = await store.get('categories', req.params.id);
@@ -839,19 +917,19 @@ export function createApp() {
     res.json({ success: true, category: updatedCategory, updatedProductsCount: products.filter((product) => product.category.toLowerCase() === oldName.toLowerCase()).length });
   }));
 
-  app.delete('/api/admin/categories/:id', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.delete('/api/admin/categories/:id', requireAdmin, asyncRoute(async (req, res) => {
     const category = await store.get('categories', req.params.id);
     if (!category) return jsonError(res, 404, 'Category not found.');
     await store.remove('categories', req.params.id);
     res.json({ success: true });
   }));
 
-  app.get('/api/admin/waiter-calls', requireAdminAuth, asyncRoute(async (_req, res) => {
+  app.get('/api/admin/waiter-calls', requireAdmin, asyncRoute(async (_req, res) => {
     const calls = (await store.list('waiterCalls')).sort((a, b) => new Date(b.calledAt || b.createdAt || 0).getTime() - new Date(a.calledAt || a.createdAt || 0).getTime());
     res.json({ calls });
   }));
 
-  app.patch('/api/admin/waiter-calls/:id/attend', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.patch('/api/admin/waiter-calls/:id/attend', requireAdmin, asyncRoute(async (req, res) => {
     const call = await store.get('waiterCalls', req.params.id);
     if (!call) return jsonError(res, 404, 'Waiter call not found.');
     const updated = { ...call, status: 'attended' as const, attendedAt: new Date().toISOString() };
@@ -859,7 +937,7 @@ export function createApp() {
     res.json({ success: true, call: updated });
   }));
 
-  app.get('/api/admin/feedbacks', requireAdminAuth, asyncRoute(async (_req, res) => {
+  app.get('/api/admin/feedbacks', requireAdmin, asyncRoute(async (_req, res) => {
     const feedbacks = (await store.list('feedbacks')).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     const averageRating = feedbacks.length ? Number((feedbacks.reduce((sum, item) => sum + item.rating, 0) / feedbacks.length).toFixed(1)) : 0;
     const ratingDistribution: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
@@ -867,7 +945,7 @@ export function createApp() {
     res.json({ feedbacks, averageRating, totalFeedbacks: feedbacks.length, ratingDistribution });
   }));
 
-  app.get('/api/admin/reports', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.get('/api/admin/reports', requireAdmin, asyncRoute(async (req, res) => {
     const { range = 'today', startDate, endDate } = req.query;
     // The dashboard sends its timezone offset so day ranges follow the
     // operator's local clock: "Today" starts at THEIR 12:00 AM, not the
@@ -922,11 +1000,11 @@ export function createApp() {
     res.json({ summary });
   }));
 
-  app.get('/api/admin/settings', requireAdminAuth, asyncRoute(async (req: Request & { adminUser?: { email?: string } }, res) => {
+  app.get('/api/admin/settings', requireAdmin, asyncRoute(async (req: Request & { adminUser?: { email?: string } }, res) => {
     res.json({ settings: await store.getSettings(), adminEmail: req.adminUser?.email || adminEmail });
   }));
 
-  app.put('/api/admin/settings', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.put('/api/admin/settings', requireAdmin, asyncRoute(async (req, res) => {
     const updates = req.body;
     if (!updates || typeof updates !== 'object') return jsonError(res, 400, 'Invalid settings payload.');
     const settings = { ...(await store.getSettings()), ...updates };
@@ -937,7 +1015,7 @@ export function createApp() {
   // Change the single admin password. It is saved to the active credential
   // store (data/admin.json locally, database on Vercel) and takes effect
   // immediately — no restart and no cloud auth service needed.
-  app.post('/api/admin/change-password', requireAdminAuth, asyncRoute(async (req, res) => {
+  app.post('/api/admin/change-password', requireAdmin, asyncRoute(async (req, res) => {
     try {
       const currentPassword = getIdentifier(req.body?.currentPassword);
       const newPassword = getIdentifier(req.body?.newPassword);
@@ -948,6 +1026,124 @@ export function createApp() {
       console.error('Change password error:', error);
       jsonError(res, 500, error?.message || 'Failed to update the admin password.');
     }
+  }));
+
+  // ── License / activation ──────────────────────────────────────────────────
+  // Only mounted when LICENSE_REQUIRED=true. In self-hosted / dev builds
+  // (LICENSE_REQUIRED unset), every route below short-circuits to a
+  // "not-required" response so the renderer can pretend the wizard
+  // already finished.
+
+  app.get('/api/license/status', asyncRoute(async (_req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ licenseRequired: false, status: { state: 'not-required' as const }, trialDays: 0, trialAvailable: false });
+    }
+    const status = await verifyLicense();
+    res.json({
+      licenseRequired: true,
+      status,
+      trialDays: getTrialDays(),
+      trialAvailable: getTrialDays() > 0,
+    });
+  }));
+
+  app.post('/api/license/start-trial', asyncRoute(async (_req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: false, error: 'This build does not require a license.' });
+    }
+    if (getTrialDays() <= 0) {
+      return res.json({ ok: false, error: 'Trials are disabled on this build.' });
+    }
+    // Idempotent: verifyLicense() auto-mints a trial if no license
+    // file exists yet, and returns the existing license otherwise.
+    const status = await verifyLicense();
+    res.json({ ok: true, trialDays: getTrialDays(), status });
+  }));
+
+  app.post('/api/license/activate', asyncRoute(async (req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: false, error: 'This build does not require a license.' });
+    }
+    const { licenseKey, email, cafeName } = req.body || {};
+    const fingerprint = (req.body && req.body.fingerprint) || 'unknown';
+    const result = await activateLicense({ licenseKey, email, cafeName, fingerprint });
+    if (!result.ok) {
+      // Map the error code to an appropriate HTTP status. The renderer
+      // mostly cares about result.errorCode; the status is for browsers
+      // and proxies.
+      const status = result.errorCode === 'KEY_BOUND_TO_OTHER_MACHINE' || result.errorCode === 'KEY_REVOKED'
+        ? 403
+        : result.errorCode === 'INVALID_KEY'
+          ? 404
+          : 400;
+      return res.status(status).json(result);
+    }
+    res.json(result);
+  }));
+
+  app.post('/api/license/heartbeat', asyncRoute(async (_req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: true, status: 'not-required' });
+    }
+    const result = await heartbeat();
+    res.json(result);
+  }));
+
+  app.post('/api/license/rebind', asyncRoute(async (req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: false, error: 'This build does not require a license.' });
+    }
+    const { licenseKey, email } = req.body || {};
+    const newFingerprint = (req.body && req.body.newFingerprint) || 'unknown';
+    const result = await rebindLicense({ licenseKey, email, newFingerprint });
+    if (!result.ok) {
+      const status = result.errorCode === 'KEY_BOUND_TO_OTHER_MACHINE' || result.errorCode === 'KEY_REVOKED'
+        ? 403
+        : result.errorCode === 'INVALID_KEY'
+          ? 404
+          : 400;
+      return res.status(status).json(result);
+    }
+    res.json(result);
+  }));
+
+  // Delete the locally stored license. Used by the wizard's "Start
+  // over" link and by support when helping a customer re-activate.
+  // Refuses to do anything if the build is not license-gated, so
+  // self-hosted users can't accidentally wipe their data file.
+  app.post('/api/license/delete', asyncRoute(async (_req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: false, error: 'This build does not require a license.' });
+    }
+    const ok = await deleteLicenseFile();
+    res.json({ ok });
+  }));
+
+  // Per-machine audit log. Newest entries first. Used by the
+  // AdminSettings → "View audit log" toggle to investigate who
+  // changed what (and from which machine, so a leaked license can
+  // be traced back to the original buyer).
+  app.get('/api/admin/audit', requireAdmin, asyncRoute(async (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+    const auditFile = path.join(
+      process.env.DATA_DIR || (process.env.VERCEL ? '/tmp/restaurant-data' : path.join(process.cwd(), 'data')),
+      'audit.log',
+    );
+    let raw = '';
+    try {
+      raw = await fs.promises.readFile(auditFile, 'utf8');
+    } catch {
+      return res.json({ entries: [] });
+    }
+    const lines = raw.split(String.fromCharCode(10)).filter((l) => l.trim());
+    const entries = lines
+      .slice(-limit)
+      .reverse()
+      .map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      })
+      .filter(Boolean);
+    res.json({ entries });
   }));
 
   // ── Global JSON error responder ────────────────────────────────────────────

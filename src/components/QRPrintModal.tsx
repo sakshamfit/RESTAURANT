@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
 import QRCode from 'qrcode';
-import { X, Download, Printer, ExternalLink, Coffee, ArrowLeft } from 'lucide-react';
+import { X, Download, Printer, ExternalLink, Coffee, ArrowLeft, Wifi, Copy, CheckCircle2 } from 'lucide-react';
 import { CafeTable, CafeSettings } from '../types';
+import type { NagoriDesktopInfo } from '../desktop';
 
 interface QRPrintModalProps {
   table: CafeTable;
@@ -17,14 +18,59 @@ export const QRPrintModal: React.FC<QRPrintModalProps> = ({
   onClose,
 }) => {
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
+  const [qrSourceUrl, setQrSourceUrl] = useState<string>('');
+  const [lanWarning, setLanWarning] = useState<string | null>(null);
+  const [copied, setCopied] = useState<boolean>(false);
+  const [desktopInfo, setDesktopInfo] = useState<NagoriDesktopInfo | null>(null);
   const printAreaRef = useRef<HTMLDivElement>(null);
 
-  const getTableUrl = (token: string) => {
+  // Fetch the desktop info once. The URL the QR encodes is derived from the
+  // staff machine's LAN address, not from the staff window's loopback URL —
+  // a customer's phone on the café Wi-Fi has no route to 127.0.0.1.
+  useEffect(() => {
+    if (!window.nagoriDesktop?.isDesktop) return;
+    window.nagoriDesktop
+      .getInfo()
+      .then((info) => setDesktopInfo(info))
+      .catch(() => setDesktopInfo(null));
+  }, []);
+
+  /**
+   * The URL the printed QR code points at. Inside the desktop app this MUST
+   * be the staff machine's LAN address (e.g. `http://192.168.1.42:38245/…`),
+   * not the browser's `window.location.origin` — that one is the staff
+   * window's loopback URL (`http://127.0.0.1:…`) and a customer's phone on
+   * the same Wi-Fi has no route to it, producing
+   * "Safari could not connect to the server".
+   */
+  const resolveTableUrl = (token: string, info: NagoriDesktopInfo | null): string => {
+    if (info) {
+      const lan = info.lanUrls?.[0]?.url;
+      if (lan) return `${lan}/order/${token}`;
+      // No LAN IP detected — staff machine is offline. Fall back to the
+      // loopback and tell the user clearly so they don't print a QR that
+      // nobody can open.
+      return `${info.localUrl || window.location.origin}/order/${token}`;
+    }
     return `${window.location.origin}/order/${token}`;
   };
 
   useEffect(() => {
-    QRCode.toDataURL(getTableUrl(table.token), {
+    const url = resolveTableUrl(table.token, desktopInfo);
+    setQrSourceUrl(url);
+    if (desktopInfo) {
+      const lan = desktopInfo.lanUrls;
+      if (!lan || lan.length === 0) {
+        setLanWarning(
+          'No Wi-Fi / Ethernet address detected on this computer. Connect the staff computer to the café Wi-Fi, then reopen this dialog. Otherwise the printed QR codes will not open on customer phones.'
+        );
+      } else {
+        setLanWarning(null);
+      }
+    } else {
+      setLanWarning(null);
+    }
+    QRCode.toDataURL(url, {
       width: 320,
       margin: 1,
       color: {
@@ -32,9 +78,9 @@ export const QRPrintModal: React.FC<QRPrintModalProps> = ({
         light: '#ffffff',
       },
     })
-      .then((url) => setQrDataUrl(url))
+      .then((dataUrl) => setQrDataUrl(dataUrl))
       .catch((err) => console.error('Failed to generate QR code:', err));
-  }, [table]);
+  }, [table, desktopInfo]);
 
   const handleDownloadSingle = () => {
     const link = document.createElement('a');
@@ -45,6 +91,30 @@ export const QRPrintModal: React.FC<QRPrintModalProps> = ({
 
   const handlePrint = () => {
     window.print();
+  };
+
+  const handleCopyLink = async () => {
+    if (!qrSourceUrl) return;
+    try {
+      await navigator.clipboard.writeText(qrSourceUrl);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Older browsers / non-secure contexts — best-effort fallback.
+      const input = document.createElement('input');
+      input.value = qrSourceUrl;
+      document.body.appendChild(input);
+      input.select();
+      try {
+        document.execCommand('copy');
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      } catch {
+        // ignore
+      } finally {
+        document.body.removeChild(input);
+      }
+    }
   };
 
   return (
@@ -133,6 +203,34 @@ export const QRPrintModal: React.FC<QRPrintModalProps> = ({
               </p>
             </div>
           </div>
+
+          {/* Desktop-only: show which URL the QR encodes and warn if no LAN IP. */}
+          {desktopInfo && (
+            <div className="w-full max-w-xs mt-4 space-y-2">
+              <div className="flex items-start gap-2 p-2.5 bg-white border border-[#e7e2dc] rounded-xl text-left">
+                <Wifi className="w-4 h-4 text-[#ea580c] mt-0.5 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-[11px] font-bold text-[#1e130c]">QR points at</p>
+                  <p className="text-[10px] font-mono text-[#6b5d52] break-all">{qrSourceUrl}</p>
+                  <p className="text-[10px] text-[#6b5d52] mt-1">
+                    Customer phones must be on the <strong>same Wi-Fi</strong> as this computer to open the menu.
+                  </p>
+                </div>
+                <button
+                  onClick={handleCopyLink}
+                  className="shrink-0 p-1.5 rounded-lg bg-[#faf8f5] hover:bg-[#f0ebe1] border border-[#e7e2dc] text-[#1e130c] transition-colors cursor-pointer"
+                  title="Copy link"
+                >
+                  {copied ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                </button>
+              </div>
+              {lanWarning && (
+                <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-[11px] text-red-800">
+                  ⚠ {lanWarning}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Modal Actions */}
@@ -163,10 +261,10 @@ export const QRPrintModal: React.FC<QRPrintModalProps> = ({
             <span>Close</span>
           </button>
 
-          {/* Test Link */}
+          {/* Test Link — desktop: open the customer view on this computer; web: open in a new tab. */}
           <div className="pt-1 text-center">
             <a
-              href={`/order/${table.token}`}
+              href={qrSourceUrl || `${window.location.origin}/order/${table.token}`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs font-medium text-[#ea580c] hover:underline inline-flex items-center gap-1"

@@ -86,7 +86,10 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-[#faf8f5] text-[#292524] flex flex-col font-sans pb-28 lg:pb-12">
+    <div
+      className="min-h-[100dvh] bg-[#faf8f5] text-[#292524] flex flex-col font-sans"
+      style={{ paddingBottom: 'max(7rem, calc(6rem + env(safe-area-inset-bottom, 0px)))' }}
+    >
       {/* Editorial Dark Hero Band */}
       <section className="bg-[#1e130c] text-white hero-backdrop-atmospheric border-b border-[#3d2618] px-4 sm:px-8 py-8 sm:py-12">
         <div className="max-w-7xl mx-auto flex flex-col md:flex-row md:items-center justify-between gap-6">
@@ -325,9 +328,9 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
             {totalCartCount > 0 ? (
               <button
                 onClick={onOpenCart}
-                className="bg-[#ea580c] hover:bg-[#c2410c] text-white px-5 py-3 rounded-md font-bold text-sm transition-all shadow-sm flex items-center gap-2 cursor-pointer"
+                className="bg-[#ea580c] hover:bg-[#c2410c] text-white px-5 py-3 rounded-md font-bold text-sm transition-all shadow-sm flex items-center gap-2 cursor-pointer whitespace-nowrap"
               >
-                <ShoppingBag className="w-4 h-4" />
+                <ShoppingBag className="w-4 h-4 shrink-0" />
                 <span>View My Order ({totalCartCount})</span>
               </button>
             ) : (
@@ -357,30 +360,39 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
         )}
       </footer>
 
-      {/* Floating Bottom Sticky Cart Bar on Mobile/Tablet */}
+      {/* Floating Bottom Sticky Cart Bar on Mobile/Tablet.
+          Anchored to the visual viewport (`dvh`) and padded for the
+          Android gesture bar / iOS home indicator via
+          `env(safe-area-inset-bottom)`. Without this, the last row of
+          products on small Android screens is covered by the bar
+          because `bottom-4` is relative to the layout viewport (which
+          doesn't include the address-bar / gesture-bar insets). */}
       {totalCartCount > 0 && (
-        <div className="fixed bottom-4 left-0 right-0 z-20 px-4">
+        <div
+          className="fixed left-0 right-0 z-20 px-4"
+          style={{ bottom: 'max(1rem, env(safe-area-inset-bottom, 0px))' }}
+        >
           <div className="max-w-md mx-auto">
             <button
               id="floating-checkout-btn"
               onClick={onOpenCart}
-              className="w-full bg-[#1e130c] hover:bg-[#140c07] text-white rounded-md p-3.5 shadow-xl border border-[#3d2618] flex items-center justify-between transition-all transform active:scale-98 cursor-pointer"
+              className="w-full bg-[#1e130c] hover:bg-[#140c07] text-white rounded-md p-3.5 shadow-xl border border-[#3d2618] flex items-center justify-between gap-2 transition-all transform active:scale-98 cursor-pointer"
             >
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-md bg-[#ea580c] text-white flex items-center justify-center font-bold text-xs">
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                <div className="w-8 h-8 shrink-0 rounded-md bg-[#ea580c] text-white flex items-center justify-center font-bold text-xs">
                   {totalCartCount}
                 </div>
-                <div className="text-left">
-                  <p className="text-[11px] tracking-tight text-[#e2d9d2] font-medium">
+                <div className="text-left min-w-0 flex-1">
+                  <p className="text-[11px] tracking-tight text-[#e2d9d2] font-medium truncate">
                     {totalCartCount} {totalCartCount === 1 ? 'item' : 'items'} in order
                   </p>
-                  <p className="text-base font-semibold leading-tight text-white">
+                  <p className="text-base font-semibold leading-tight text-white truncate">
                     {settings.currency}{totalCartAmount}
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-1.5 text-xs font-semibold bg-[#ea580c] text-white px-3.5 py-2 rounded-md shadow-xs">
+              <div className="shrink-0 flex items-center gap-1.5 text-xs font-semibold bg-[#ea580c] text-white px-3.5 py-2 rounded-md shadow-xs">
                 <span>View Order</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </div>

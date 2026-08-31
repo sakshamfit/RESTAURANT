@@ -13,6 +13,7 @@ import {
   VolumeX,
   BellRing,
   Star,
+  Download,
 } from 'lucide-react';
 import { Order, Product, CafeTable, CafeCategory, CafeSettings, WaiterCall } from '../types';
 import { api, BackendHealth } from '../services/api';
@@ -69,6 +70,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [waiterAlertActive, setWaiterAlertActive] = useState<boolean>(false);
   const [waiterAlertTables, setWaiterAlertTables] = useState<string[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [updateState, setUpdateState] = useState<{ available: boolean; currentVersion?: string; latestVersion?: string } | null>(null);
+  const bridge = (window as unknown as { nagoriBridge?: { getUpdateState?: () => Promise<{ available: boolean; currentVersion?: string; latestVersion?: string }>; checkForUpdates?: () => Promise<void> } }).nagoriBridge;
 
   // We identify incoming orders by their immutable ID, never by a count. That
   // means two tables ordering together are both announced, even if a staff
@@ -292,6 +295,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     fetchAllData(true);
 
+    // Auto-update check on the desktop build. Web customers see nothing.
+    // The bridge is only present when running inside Electron — wrap in
+    // a try so the web build is unaffected.
+    if (bridge && typeof bridge.getUpdateState === 'function') {
+      // Don't block the dashboard on this — it's a tiny network call.
+      void bridge.getUpdateState()
+        .then((s) => {
+          if (s && s.available) setUpdateState(s);
+        })
+        .catch(() => { /* ignore — feature unavailable */ });
+    }
+
     // Polling keeps this compatible with local file storage and serverless
     // deployments while automatically catching orders and waiter calls from
     // every table. Split by how often data actually changes, so the backend is
@@ -503,6 +518,49 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           })}
         </div>
       </header>
+
+      {/* Update banner — only on the desktop app when electron-updater
+          reports a newer version. Offers a one-click "Restart and
+          update" via the Console menu. Self-hosted / web customers
+          see nothing. */}
+      {updateState && updateState.available && updateState.latestVersion && (
+        <div className="px-4 py-2.5 text-xs font-semibold border-b bg-sky-50 text-sky-900 border-sky-200 flex flex-wrap items-center gap-2">
+          <Download className="w-4 h-4 shrink-0" />
+          <span>
+            <strong>Update available.</strong> Version {updateState.latestVersion} is ready to install
+            (you have v{updateState.currentVersion || 'unknown'}).
+          </span>
+          <button
+            type="button"
+            onClick={() => bridge?.checkForUpdates?.()}
+            className="ml-auto px-3 py-1 rounded-md bg-sky-600 text-white font-bold hover:bg-sky-700 transition"
+          >
+            Restart and update
+          </button>
+        </div>
+      )}
+
+      {/* Trial banner — only on distributed builds where the active
+          license is a trial. Shows days remaining + Subscribe CTA. */}
+      {backendHealth?.license?.state === 'active' && backendHealth.license.payload?.plan === 'trial' && backendHealth.license.payload.exp && (
+        <div className="px-4 py-2.5 text-xs font-semibold border-b bg-emerald-50 text-emerald-900 border-emerald-200 flex flex-wrap items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-current animate-pulse shrink-0" />
+          <span>
+            <strong>Free trial.</strong> You have{' '}
+            {Math.max(0, Math.ceil((backendHealth.license.payload.exp - Date.now()) / (24 * 60 * 60 * 1000)))}{' '}
+            day{Math.max(0, Math.ceil((backendHealth.license.payload.exp - Date.now()) / (24 * 60 * 60 * 1000))) === 1 ? '' : 's'} left.
+            {' '}Subscribe to keep your data and the admin console.
+          </span>
+          <a
+            href="https://nexoraosp.com/subscribe"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto px-3 py-1 rounded-md bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition"
+          >
+            Subscribe
+          </a>
+        </div>
+      )}
 
       {/* Backend Storage Health Banner (informative — shows where data is saved) */}
       {backendHealth && backendHealth.persistence !== 'postgres' && (

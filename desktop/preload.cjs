@@ -13,4 +13,19 @@ contextBridge.exposeInMainWorld('nagoriDesktop', {
   getInfo: () => ipcRenderer.invoke('desktop:info'),
   /** Opens the folder that holds this machine's orders/menu database. */
   openDataFolder: () => ipcRenderer.invoke('desktop:open-data-folder'),
+  /**
+   * Returns a stable, opaque per-machine identifier used for license
+   * binding. The renderer falls back to a localStorage-backed UUID in
+   * the browser build (see services/license.ts) so the same code works
+   * on both the desktop app and the web.
+   */
+  getMachineFingerprint: () => ipcRenderer.invoke('desktop:machine-fingerprint'),
+  /**
+   * Auto-update. The main process owns the actual download + install
+   * flow (via electron-updater); the renderer just asks "is there an
+   * update?" or triggers the interactive "Check for updates" dialog
+   * (which also shows release notes and the restart prompt).
+   */
+  getUpdateState: () => ipcRenderer.invoke('desktop:get-update-state'),
+  checkForUpdates: () => ipcRenderer.invoke('desktop:check-for-updates'),
 });

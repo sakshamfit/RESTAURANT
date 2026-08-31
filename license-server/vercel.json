@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "functions": {
+    "api/license/*.ts": {
+      "maxDuration": 10,
+      "memory": 256
+    },
+    "api/admin/*.ts": {
+      "maxDuration": 10,
+      "memory": 256
+    }
+  },
+  "rewrites": [
+    { "source": "/", "destination": "/pages/index.html" }
+  ]
+}

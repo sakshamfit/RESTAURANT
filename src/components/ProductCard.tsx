@@ -122,11 +122,16 @@ export const ProductCard: React.FC<ProductCardProps> = ({
           )}
         </div>
 
-        {/* Product Title & Description */}
-        <h4 className="text-base font-semibold text-[#292524] leading-snug mb-1">
+        {/* Product Title & Description. `break-words` is critical on
+            Android Chrome: without it, a long product name (e.g.
+            "Masala Dosa with Butter and Extra Coconut Chutney")
+            forces the card wider than the viewport, which makes the
+            whole body scroll sideways and gives the impression that
+            vertical scroll is "stuck". */}
+        <h4 className="text-base font-semibold text-[#292524] leading-snug mb-1 break-words">
           {product.name}
         </h4>
-        <p className="text-xs text-[#78716c] leading-relaxed line-clamp-2 mb-4 font-normal">
+        <p className="text-xs text-[#78716c] leading-relaxed line-clamp-2 mb-4 font-normal break-words">
           {product.description || 'Prepared fresh upon order.'}
         </p>
       </div>
@@ -143,7 +148,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
                   type="button"
                   onClick={() => setSelectedVariant(variant)}
                   disabled={!product.isAvailable}
-                  className={`flex-1 py-1.5 px-2 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                  className={`flex-1 min-w-0 py-1.5 px-2 rounded-md text-xs font-semibold transition-all cursor-pointer text-center break-words ${
                     isSelected
                       ? 'bg-[#1e130c] text-white shadow-xs'
                       : 'bg-[#faf8f5] text-[#78716c] border border-[#e7e2dc] hover:bg-white hover:text-[#292524]'

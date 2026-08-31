@@ -32,6 +32,8 @@ import { TableQRScannerModal } from './components/TableQRScannerModal';
 import { TableOrderHistoryModal } from './components/TableOrderHistoryModal';
 import { sendBrowserNotification, requestNotificationPermission } from './utils/browserNotifications';
 import { saveMyDeviceOrderId } from './utils/deviceOrders';
+import { SetupWizard } from './components/SetupWizard';
+import { licenseService, useFingerprintBootstrap, type LicenseStatusPayload } from './services/license';
 
 export default function App() {
   // Navigation & View Mode
@@ -40,6 +42,14 @@ export default function App() {
   });
   const [adminLoggedInEmail, setAdminLoggedInEmail] = useState<string | null>(null);
   const [checkingAuth, setCheckingAuth] = useState<boolean>(true);
+  // License / first-run setup. When `licenseRequired=true` AND the
+  // status is missing/invalid/expired-out-of-grace, the wizard takes over
+  // the whole screen and the rest of the app does not mount until it
+  // finishes. `licenseStatus` is `null` until the first /api/license/status
+  // call resolves.
+  const [licenseStatus, setLicenseStatus] = useState<LicenseStatusPayload | null>(null);
+  const [licenseRequired, setLicenseRequired] = useState<boolean>(false);
+  const [setupComplete, setSetupComplete] = useState<boolean>(false);
 
   // Customer Table & Menu State
   const [activeTableToken, setActiveTableToken] = useState<string>(() => {
@@ -68,6 +78,11 @@ export default function App() {
 
   // 1. Check Path and Admin Auth on mount
   useEffect(() => {
+    // Resolve the machine fingerprint (desktop IPC or web UUID) before any
+    // license call so the wizard shows the real fingerprint in its preview
+    // and the first activation binds to the correct identifier.
+    void useFingerprintBootstrap();
+
     // Check if path has /order/:token or /table/:token
     const path = window.location.pathname;
     const urlParams = new URLSearchParams(window.location.search);
@@ -88,6 +103,33 @@ export default function App() {
 
     // Verify existing admin token if present
     const existingToken = localStorage.getItem('nagori_admin_token');
+    const finishAuth = () => setCheckingAuth(false);
+
+    // License check runs in parallel with admin auth; it gates whether
+    // the SetupWizard takes over the screen before the rest of the app
+    // mounts. If the build doesn't require a license, this resolves to
+    // `not-required` and the wizard is skipped entirely.
+    licenseService
+      .getStatus()
+      .then((s) => {
+        setLicenseRequired(s.licenseRequired);
+        setLicenseStatus(s.status);
+        // Active = ready to go (or not-required). Anything else, when
+        // licenses are required, means the wizard must run first.
+        if (s.licenseRequired && s.status.state !== 'active') {
+          setSetupComplete(false);
+        } else {
+          setSetupComplete(true);
+        }
+      })
+      .catch(() => {
+        // Server unreachable — don't block the app forever. Default to
+        // "no license required" so the existing UX wins, and let the
+        // user retry from Café Settings if they have a key.
+        setLicenseRequired(false);
+        setSetupComplete(true);
+      });
+
     if (existingToken) {
       api.adminGetMe()
         .then((res) => {
@@ -96,11 +138,9 @@ export default function App() {
         .catch(() => {
           localStorage.removeItem('nagori_admin_token');
         })
-        .finally(() => {
-          setCheckingAuth(false);
-        });
+        .finally(finishAuth);
     } else {
-      setCheckingAuth(false);
+      finishAuth();
     }
   }, []);
 
@@ -274,7 +314,7 @@ export default function App() {
     setAdminLoggedInEmail(null);
   };
 
-  if (checkingAuth) {
+  if (checkingAuth || licenseStatus === null) {
     return (
       <div className="min-h-screen bg-stone-900 flex items-center justify-center p-4">
         <div className="text-center space-y-3 text-white">
@@ -283,6 +323,16 @@ export default function App() {
         </div>
       </div>
     );
+  }
+
+  // First-run setup wizard takes over the entire screen until a valid
+  // license (or, in self-hosted builds, just a café name + admin password)
+  // is in place. Customer routes are NOT shown here — the wizard is the
+  // only thing on screen — but a customer who scans a QR code BEFORE the
+  // owner has finished setup will land on a clear "not yet activated"
+  // empty state from the customer API (because the data folder is fresh).
+  if (licenseRequired && !setupComplete) {
+    return <SetupWizard onComplete={() => setSetupComplete(true)} />;
   }
 
   // ----------------------------------------------------
