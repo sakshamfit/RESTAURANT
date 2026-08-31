@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# NEXORAOSP RESTAURANT — desktop staff console launcher (portable build).
+# Requires Node.js 18+ on PATH. All data is stored under ~/.nexoraosp-restaurant/data.
+set -euo pipefail
+
+APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "Node.js 18+ is required to run NEXORAOSP RESTAURANT."
+  echo "Install it from https://nodejs.org and try again."
+  exit 1
+fi
+
+exec node "$APP_DIR/launcher.cjs" "$@"

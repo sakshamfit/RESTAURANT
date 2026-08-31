@@ -38,7 +38,7 @@ export const QRPrintModal: React.FC<QRPrintModalProps> = ({
 
   const handleDownloadSingle = () => {
     const link = document.createElement('a');
-    link.download = `Nagori_Tea_Point_QR_Table_${table.tableNumber}.png`;
+    link.download = `NEXORAOSP_RESTAURANT_QR_Table_${table.tableNumber}.png`;
     link.href = qrDataUrl;
     link.click();
   };

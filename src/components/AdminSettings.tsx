@@ -211,7 +211,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
             </label>
             <input
               type="text"
-              placeholder="e.g. nagoriteapoint@upi"
+              placeholder="e.g. nexoraosp@upi"
               value={formData.upiId || ''}
               onChange={(e) => setFormData({ ...formData, upiId: e.target.value })}
               className="w-full px-3.5 py-2 bg-stone-50 border border-stone-200 rounded-xl text-xs font-mono font-medium text-stone-900 focus:bg-white focus:ring-2 focus:ring-amber-500"

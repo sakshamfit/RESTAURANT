@@ -20,7 +20,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenCart,
   isAdmin,
   onToggleAdmin,
-  cafeName = 'Nagori Tea Point',
+  cafeName = 'NEXORAOSP RESTAURANT',
   onOpenTableSelect,
   onOpenQRScanner,
   onOpenOrderHistory,

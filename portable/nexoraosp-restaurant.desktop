@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=NEXORAOSP RESTAURANT
+GenericName=Restaurant Staff Console
+Comment=Live orders, waiter calls and menu management
+Exec=/opt/nexoraosp-restaurant/nexoraosp-restaurant
+Icon=nexoraosp-restaurant
+Terminal=false
+Categories=Office;Business;
+StartupNotify=false
+Keywords=restaurant;cafe;orders;POS;admin

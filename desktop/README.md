@@ -1,12 +1,12 @@
-# Nagori Chai Point — Desktop Console
+# NEXORAOSP RESTAURANT — Desktop Console
 
-An installable staff terminal for the café: the production web build and the
-Express API are bundled into a single Electron app. At startup the app spawns
-the bundled server on a free loopback port (`127.0.0.1` only), stores all data
-in the OS user-data folder, and opens the admin console.
+An installable staff terminal for the restaurant: the production web build and
+the Express API are bundled into a single Electron app. At startup the app
+spawns the bundled server on a free loopback port (`127.0.0.1` only), stores
+all data in the OS user-data folder, and opens the admin console.
 
 There is deliberately **no** cloud dependency: menu, orders, waiter calls and
-settings live in `<user data>/Nagori Chai Point/data/` as JSON (or in your own
+settings live in `<user data>/NEXORAOSP RESTAURANT/data/` as JSON (or in your own
 PostgreSQL if you set `DATABASE_URL` before launching).
 
 ## Layout
@@ -47,7 +47,7 @@ npm run desktop:build -- --mac   # macOS dmg (build on macOS)
 ```
 
 Installers land in `release/` at the repo root, named
-`nagori-chai-point-<version>-<os>-<arch>.<ext>`.
+`nexoraosp-restaurant-<version>-<os>-<arch>.<ext>`.
 
 ## Automated builds
 

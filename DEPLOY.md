@@ -1,11 +1,11 @@
-# Deploy to Vercel (free) — nagori-restaurent.vercel.app
+# Deploy to Vercel (free) — nexoraosp-restaurant.vercel.app
 
 The app is fully self-contained: React frontend + Express API + local JSON data.
 No Firebase, no Supabase, no paid services.
 
 ## Live site not working? — 2-minute triage
 
-Open **`https://nagori-restaurent.vercel.app/api/health`** and read one field:
+Open **`https://nexoraosp-restaurant.vercel.app/api/health`** and read one field:
 
 | What you see | What it means | What to do |
 | --- | --- | --- |
@@ -34,8 +34,8 @@ Other quick checks:
    - Framework preset: **Vite** (auto-detected).
    - Build command: `npm run build` (comes from `vercel.json`).
    - Output directory: `dist` (comes from `vercel.json`).
-4. Give the project the exact name **`nagori-restaurent`**.
-   → Your URL will be **https://nagori-restaurent.vercel.app**
+4. Give the project the exact name **`nexoraosp-restaurant`**.
+   → Your URL will be **https://nexoraosp-restaurant.vercel.app**
 5. Click **Deploy**. Done.
 
 ## Important: admin password on Vercel
@@ -88,10 +88,10 @@ the "Update Password" screen in Admin → Café Settings instead.
 
 ## After deploying
 
-- Open `https://nagori-restaurent.vercel.app/admin` (or the Admin button) and
+- Open `https://nexoraosp-restaurant.vercel.app/admin` (or the Admin button) and
   log in with the `ADMIN_PASSWORD` you set.
 - Customer view: click any table / scan QR at
-  `https://nagori-restaurent.vercel.app/order/nagori_tbl_tok_table1_9a2f7c`.
+  `https://nexoraosp-restaurant.vercel.app/order/nexoraosp_tbl_tok_table1_9a2f7c`.
 
 ## Spoken order and waiter alerts on the admin dashboard
 
@@ -112,7 +112,7 @@ the "Update Password" screen in Admin → Café Settings instead.
 
 ## Checking backend health
 
-`https://nagori-restaurent.vercel.app/api/health` reports exactly where data is
+`https://nexoraosp-restaurant.vercel.app/api/health` reports exactly where data is
 stored and why:
 
 - `"persistence": "postgres"` → real database in use, data is durable. ✅

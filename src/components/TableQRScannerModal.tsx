@@ -63,7 +63,7 @@ export const TableQRScannerModal: React.FC<TableQRScannerModalProps> = ({
     }
 
     // 2. Check if it's a token directly
-    if (text.startsWith('nagori_tbl_tok_')) {
+    if (text.startsWith('nexoraosp_tbl_tok_')) {
       return { identifier: text };
     }
 

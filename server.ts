@@ -50,7 +50,7 @@ async function startServer() {
   }
 
   app.listen(PORT, HOST, () => {
-    console.log(`Nagori Chai Point server running on http://${HOST}:${PORT} (persistence: ${store.provider})`);
+    console.log(`NEXORAOSP RESTAURANT server running on http://${HOST}:${PORT} (persistence: ${store.provider})`);
     if (store.provider === 'postgres') {
       console.log(`Persistence: direct Postgres via DATABASE_URL (${new URL(pgUrlSafe()).host}).`);
     } else {
