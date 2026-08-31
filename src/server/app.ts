@@ -25,6 +25,16 @@ import {
   getAdminSessionSecret,
   verifyAdminPassword,
 } from './auth.js';
+import {
+  activateLicense,
+  deleteLicenseFile,
+  getStoredPayload,
+  heartbeat,
+  isLicenseRequired,
+  rebindLicense,
+  verifyLicense,
+  type LicenseStatus,
+} from './license.js';
 
 dotenv.config();
 
@@ -176,6 +186,29 @@ function publicSettings(settings: CafeSettings) {
   };
 }
 
+/**
+ * Parse the JSON list of LAN addresses the desktop shell writes into
+ * DESKTOP_LAN_URLS. Defensive: the renderer never crashes if the env var is
+ * missing or malformed — the QR-code modal simply falls back to the loopback
+ * URL and shows a clear "no Wi-Fi detected" note.
+ */
+function parseDesktopLanUrls(raw: string | undefined): Array<{ url: string; address: string; interface: string }> {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry) => entry && typeof entry.url === 'string' && typeof entry.address === 'string')
+      .map((entry) => ({
+        url: String(entry.url),
+        address: String(entry.address),
+        interface: typeof entry.interface === 'string' ? entry.interface : '',
+      }));
+  } catch {
+    return [];
+  }
+}
+
 function jsonError(res: Response, status: number, message: string) {
   return res.status(status).json({ error: message });
 }
@@ -197,6 +230,41 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   (req as Request & { adminUser?: { email?: string } }).adminUser = { email: session.email || adminEmail };
   next();
 }
+
+/**
+ * Admin guard for distributed builds: when `LICENSE_REQUIRED=true`, the admin
+ * console and admin APIs are blocked until a valid license file is present.
+ * Customer APIs (placing orders, viewing the menu) are NEVER blocked — a café
+ * never goes dark because of a license issue.
+ *
+ * Returns a 402 with a structured payload so the UI can show the right
+ * "activate / renew" screen instead of a generic error.
+ */
+async function requireValidLicense(_req: Request, res: Response, next: NextFunction) {
+  if (!isLicenseRequired()) return next();
+  const status = await verifyLicense();
+  if (status.state === 'active' || status.state === 'not-required') return next();
+  if (status.state === 'expired' && status.gracePeriodEndsAt) {
+    // Still inside the 7-day grace window — let the admin keep working but
+    // mark the response so the UI can show a renewal banner.
+    res.setHeader('X-License-State', 'expired-grace');
+    res.setHeader('X-License-Grace-Ends-At', String(status.gracePeriodEndsAt));
+    return next();
+  }
+  res.status(402).json({
+    error: 'License required',
+    license: status,
+    action: status.state === 'missing' ? 'activate' : 'renew',
+  });
+}
+
+// Combined guard used by every admin route. Validates the license BEFORE
+// the admin session check so a banned/expired customer is told to renew
+// instead of being asked to log in.
+const requireAdmin: Array<typeof requireValidLicense | typeof requireAdminAuth> = [
+  requireValidLicense,
+  requireAdminAuth,
+];
 
 async function sendWhatsAppNotification(order: Order, settings: CafeSettings): Promise<{ success: boolean; error?: string }> {
   if (!settings.enableWhatsAppAlerts || !settings.whatsappNumber) {
@@ -244,8 +312,18 @@ export function createApp() {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-  app.get('/api/health', (_req, res) => {
+  app.get('/api/health', async (_req, res) => {
     const diagnostics = store.getDiagnostics();
+    const isDesktop = process.env.DESKTOP_APP === '1';
+    // LAN addresses of the host running the server, when in desktop mode. The
+    // renderer uses these to build QR-code URLs that customer phones on the
+    // same Wi-Fi can actually reach — `window.location.origin` would be the
+    // staff machine's loopback, which a phone has no route to.
+    const lanUrls = isDesktop ? parseDesktopLanUrls(process.env.DESKTOP_LAN_URLS) : [];
+    const port = Number(process.env.PORT || 3000);
+    // License state is reported (without secrets) so the dashboard can show
+    // the right banner without an extra round-trip.
+    const licenseStatus = isLicenseRequired() ? await verifyLicense() : ({ state: 'not-required' } as LicenseStatus);
     res.set('Cache-Control', 'no-store');
     res.json({
       status: 'ok',
@@ -266,6 +344,12 @@ export function createApp() {
         : undefined,
       dataFile: diagnostics.dataFile,
       ephemeral: diagnostics.ephemeral,
+      isDesktop: isDesktop || undefined,
+      localUrl: isDesktop ? `http://127.0.0.1:${port}` : null,
+      lanUrls,
+      // License state — null when licenses aren't enforced.
+      licenseRequired: isLicenseRequired() || undefined,
+      license: isLicenseRequired() ? licenseStatus : undefined,
       // Ops helpers: a very low uptime together with "connected" on every check
       // means requests keep landing on fresh cold starts; VERCEL_REGION shows
       // which datacenter served the request.
@@ -273,6 +357,74 @@ export function createApp() {
       region: process.env.VERCEL_REGION || null,
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // ----------------------------------------------------
+  // License / activation
+  //
+  // These routes are public (no auth) so a fresh install can activate
+  // before the customer has an admin account. They are also available
+  // when LICENSE_REQUIRED is false — a self-hosted user can still
+  // voluntarily register a key to get a "subscription" card in the
+  // dashboard, but the app keeps working without it.
+  // ----------------------------------------------------
+  app.get('/api/license/status', async (_req, res) => {
+    try {
+      const status = isLicenseRequired() ? await verifyLicense() : ({ state: 'not-required' } as LicenseStatus);
+      res.json({ licenseRequired: isLicenseRequired(), status });
+    } catch (error) {
+      jsonError(res, 500, 'Unable to read license state.');
+    }
+  });
+
+  app.post('/api/license/activate', async (req, res) => {
+    try {
+      const { licenseKey, email, cafeName, fingerprint } = req.body || {};
+      if (!licenseKey || !email || !cafeName || !fingerprint) {
+        return jsonError(res, 400, 'licenseKey, email, cafeName and fingerprint are all required.');
+      }
+      const result = await activateLicense({ licenseKey, email, cafeName, fingerprint });
+      res.json(result);
+    } catch (error: any) {
+      jsonError(res, 500, error?.message || 'Activation failed.');
+    }
+  });
+
+  app.post('/api/license/rebind', async (req, res) => {
+    try {
+      const { licenseKey, email, newFingerprint } = req.body || {};
+      if (!licenseKey || !email || !newFingerprint) {
+        return jsonError(res, 400, 'licenseKey, email and newFingerprint are all required.');
+      }
+      const result = await rebindLicense({ licenseKey, email, newFingerprint });
+      res.json(result);
+    } catch (error: any) {
+      jsonError(res, 500, error?.message || 'Rebind failed.');
+    }
+  });
+
+  app.post('/api/license/heartbeat', async (_req, res) => {
+    try {
+      const result = await heartbeat();
+      res.json(result);
+    } catch (error: any) {
+      jsonError(res, 500, error?.message || 'Heartbeat failed.');
+    }
+  });
+
+  // Remove the local license file. Available in dev / self-hosted builds
+  // so the user can reset to "fresh install" without uninstalling. In a
+  // distributed build this is a no-op once the central server marks the
+  // key revoked, but the local file will be deleted and the next status
+  // check will return "missing".
+  app.post('/api/license/deactivate', async (_req, res) => {
+    try {
+      await deleteLicenseFile();
+      const status = isLicenseRequired() ? await verifyLicense() : ({ state: 'not-required' } as LicenseStatus);
+      res.json({ ok: true, status });
+    } catch (error: any) {
+      jsonError(res, 500, error?.message || 'Deactivation failed.');
+    }
   });
 
   // ----------------------------------------------------
@@ -502,17 +654,17 @@ export function createApp() {
     });
   });
 
-  app.get('/api/admin/me', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
+  app.get('/api/admin/me', requireAdmin, async (req: Request & { adminUser?: { email?: string } }, res) => {
     res.json({ email: req.adminUser?.email || adminEmail, cafeName: (await store.getSettings()).cafeName });
   });
 
   // Sessions are stateless (signed tokens), so logging out is a client-side
   // token removal; the token itself simply expires after its 7-day lifetime.
-  app.post('/api/admin/logout', requireAdminAuth, (_req, res) => {
+  app.post('/api/admin/logout', requireAdmin, (_req, res) => {
     res.json({ success: true });
   });
 
-  app.get('/api/admin/orders', requireAdminAuth, async (req, res) => {
+  app.get('/api/admin/orders', requireAdmin, async (req, res) => {
     try {
       // `scope=all-tables` is the read-only feed used by the admin dashboard's
       // live order alerts. It deliberately ignores status/table filters so Table 1,
@@ -533,7 +685,7 @@ export function createApp() {
     }
   });
 
-  app.patch('/api/admin/orders/:id/status', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/orders/:id/status', requireAdmin, async (req, res) => {
     try {
       const order = await store.get('orders', req.params.id);
       if (!order) return jsonError(res, 404, 'Order not found.');
@@ -555,7 +707,7 @@ export function createApp() {
     }
   });
 
-  app.patch('/api/admin/orders/:id/payment', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/orders/:id/payment', requireAdmin, async (req, res) => {
     try {
       const order = await store.get('orders', req.params.id);
       if (!order) return jsonError(res, 404, 'Order not found.');
@@ -570,11 +722,11 @@ export function createApp() {
     }
   });
 
-  app.get('/api/admin/products', requireAdminAuth, async (_req, res) => {
+  app.get('/api/admin/products', requireAdmin, async (_req, res) => {
     res.json({ products: (await store.list('products')).sort((a, b) => a.displayOrder - b.displayOrder) });
   });
 
-  app.post('/api/admin/products', requireAdminAuth, async (req, res) => {
+  app.post('/api/admin/products', requireAdmin, async (req, res) => {
     try {
       const body = req.body || {};
       const timestamp = new Date().toISOString();
@@ -603,7 +755,7 @@ export function createApp() {
     }
   });
 
-  app.put('/api/admin/products/:id', requireAdminAuth, async (req, res) => {
+  app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
     try {
       const existing = await store.get('products', req.params.id);
       if (!existing) return jsonError(res, 404, 'Product not found.');
@@ -627,7 +779,7 @@ export function createApp() {
     }
   });
 
-  app.patch('/api/admin/products/:id/availability', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/products/:id/availability', requireAdmin, async (req, res) => {
     const product = await store.get('products', req.params.id);
     if (!product) return jsonError(res, 404, 'Product not found.');
     const updated = { ...product, isAvailable: !product.isAvailable, updatedAt: new Date().toISOString() };
@@ -635,14 +787,14 @@ export function createApp() {
     res.json({ success: true, product: updated });
   });
 
-  app.delete('/api/admin/products/:id', requireAdminAuth, async (req, res) => {
+  app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
     const product = await store.get('products', req.params.id);
     if (!product) return jsonError(res, 404, 'Product not found.');
     await store.remove('products', req.params.id);
     res.json({ success: true });
   });
 
-  app.get('/api/admin/tables', requireAdminAuth, async (_req, res) => {
+  app.get('/api/admin/tables', requireAdmin, async (_req, res) => {
     const snapshot = await store.snapshot();
     const tables = snapshot.tables.map((table) => ({
       ...table,
@@ -651,7 +803,7 @@ export function createApp() {
     res.json({ tables });
   });
 
-  app.post('/api/admin/tables', requireAdminAuth, async (req, res) => {
+  app.post('/api/admin/tables', requireAdmin, async (req, res) => {
     const tableNumber = Number(req.body?.tableNumber);
     if (!Number.isFinite(tableNumber) || tableNumber <= 0) return jsonError(res, 400, 'Valid table number is required.');
     const tables = await store.list('tables');
@@ -668,7 +820,7 @@ export function createApp() {
     res.status(201).json({ success: true, table });
   });
 
-  app.patch('/api/admin/tables/:id/toggle', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/tables/:id/toggle', requireAdmin, async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     const updated = { ...table, isActive: !table.isActive };
@@ -676,7 +828,7 @@ export function createApp() {
     res.json({ success: true, table: updated });
   });
 
-  app.patch('/api/admin/tables/:id/regenerate-token', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/tables/:id/regenerate-token', requireAdmin, async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     const updated = { ...table, token: `nexoraosp_tbl_tok_table${table.tableNumber}_${crypto.randomBytes(6).toString('hex')}` };
@@ -684,18 +836,18 @@ export function createApp() {
     res.json({ success: true, table: updated });
   });
 
-  app.delete('/api/admin/tables/:id', requireAdminAuth, async (req, res) => {
+  app.delete('/api/admin/tables/:id', requireAdmin, async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     await store.remove('tables', req.params.id);
     res.json({ success: true });
   });
 
-  app.get('/api/admin/categories', requireAdminAuth, async (_req, res) => {
+  app.get('/api/admin/categories', requireAdmin, async (_req, res) => {
     res.json({ categories: (await store.list('categories')).sort((a, b) => a.displayOrder - b.displayOrder) });
   });
 
-  app.post('/api/admin/categories', requireAdminAuth, async (req, res) => {
+  app.post('/api/admin/categories', requireAdmin, async (req, res) => {
     const name = getIdentifier(req.body?.name);
     if (!name) return jsonError(res, 400, 'Category name is required.');
     const categories = await store.list('categories');
@@ -704,7 +856,7 @@ export function createApp() {
     res.status(201).json({ success: true, category });
   });
 
-  app.put('/api/admin/categories/:id', requireAdminAuth, async (req, res) => {
+  app.put('/api/admin/categories/:id', requireAdmin, async (req, res) => {
     const name = getIdentifier(req.body?.name);
     if (!name) return jsonError(res, 400, 'Valid category name is required.');
     const category = await store.get('categories', req.params.id);
@@ -717,19 +869,19 @@ export function createApp() {
     res.json({ success: true, category: updatedCategory, updatedProductsCount: products.filter((product) => product.category.toLowerCase() === oldName.toLowerCase()).length });
   });
 
-  app.delete('/api/admin/categories/:id', requireAdminAuth, async (req, res) => {
+  app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
     const category = await store.get('categories', req.params.id);
     if (!category) return jsonError(res, 404, 'Category not found.');
     await store.remove('categories', req.params.id);
     res.json({ success: true });
   });
 
-  app.get('/api/admin/waiter-calls', requireAdminAuth, async (_req, res) => {
+  app.get('/api/admin/waiter-calls', requireAdmin, async (_req, res) => {
     const calls = (await store.list('waiterCalls')).sort((a, b) => new Date(b.calledAt || b.createdAt || 0).getTime() - new Date(a.calledAt || a.createdAt || 0).getTime());
     res.json({ calls });
   });
 
-  app.patch('/api/admin/waiter-calls/:id/attend', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/waiter-calls/:id/attend', requireAdmin, async (req, res) => {
     const call = await store.get('waiterCalls', req.params.id);
     if (!call) return jsonError(res, 404, 'Waiter call not found.');
     const updated = { ...call, status: 'attended' as const, attendedAt: new Date().toISOString() };
@@ -737,7 +889,7 @@ export function createApp() {
     res.json({ success: true, call: updated });
   });
 
-  app.get('/api/admin/feedbacks', requireAdminAuth, async (_req, res) => {
+  app.get('/api/admin/feedbacks', requireAdmin, async (_req, res) => {
     const feedbacks = (await store.list('feedbacks')).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     const averageRating = feedbacks.length ? Number((feedbacks.reduce((sum, item) => sum + item.rating, 0) / feedbacks.length).toFixed(1)) : 0;
     const ratingDistribution: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
@@ -745,7 +897,7 @@ export function createApp() {
     res.json({ feedbacks, averageRating, totalFeedbacks: feedbacks.length, ratingDistribution });
   });
 
-  app.get('/api/admin/reports', requireAdminAuth, async (req, res) => {
+  app.get('/api/admin/reports', requireAdmin, async (req, res) => {
     const { range = 'today', startDate, endDate } = req.query;
     const nowDate = new Date();
     let filterStart = new Date(0);
@@ -780,11 +932,11 @@ export function createApp() {
     res.json({ summary });
   });
 
-  app.get('/api/admin/settings', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
+  app.get('/api/admin/settings', requireAdmin, async (req: Request & { adminUser?: { email?: string } }, res) => {
     res.json({ settings: await store.getSettings(), adminEmail: req.adminUser?.email || adminEmail });
   });
 
-  app.put('/api/admin/settings', requireAdminAuth, async (req, res) => {
+  app.put('/api/admin/settings', requireAdmin, async (req, res) => {
     const updates = req.body;
     if (!updates || typeof updates !== 'object') return jsonError(res, 400, 'Invalid settings payload.');
     const settings = { ...(await store.getSettings()), ...updates };
@@ -795,7 +947,7 @@ export function createApp() {
   // Change the single admin password. It is saved to the active credential
   // store (data/admin.json locally, database on Vercel) and takes effect
   // immediately — no restart and no cloud auth service needed.
-  app.post('/api/admin/change-password', requireAdminAuth, async (req, res) => {
+  app.post('/api/admin/change-password', requireAdmin, async (req, res) => {
     try {
       const currentPassword = getIdentifier(req.body?.currentPassword);
       const newPassword = getIdentifier(req.body?.newPassword);

@@ -8,21 +8,26 @@
  *
  *   1. A free local port is reserved.
  *   2. The bundled server (app/server.cjs) is started as a child process with
- *      NODE_ENV=production, HOST=127.0.0.1, DIST_DIR=<bundled web build> and
+ *      NODE_ENV=production, HOST=0.0.0.0, DIST_DIR=<bundled web build> and
  *      DATA_DIR=<user data>/data, so all orders/menu data live in a writable,
- *      per-user folder (never inside the install directory).
+ *      per-user folder (never inside the install directory). Binding to
+ *      0.0.0.0 (not 127.0.0.1) is what lets customer phones on the café
+ *      Wi-Fi open the printed table QR codes — the loopback-only address is
+ *      not reachable from another device.
  *   3. The window loads http://127.0.0.1:<port>/admin once /api/health answers.
  *
  * The renderer is a normal browser context: no Node integration, sandboxed,
  * with a single contextBridge API exposed by preload.cjs.
  */
 
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, clipboard } = require('electron');
 const { fork } = require('child_process');
 const http = require('http');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const APP_NAME = 'NEXORAOSP RESTAURANT';
 const WINDOW_TITLE = `${APP_NAME} — Staff Console`;
@@ -41,6 +46,71 @@ let serverPort = null;
 let mainWindow = null;
 let isQuitting = false;
 let serverLogTail = [];
+
+// ── Network helpers ────────────────────────────────────────────────────────
+
+/**
+ * Returns the machine's non-internal IPv4 addresses so the printed table QR
+ * codes can point at a URL a customer's phone on the same Wi-Fi can actually
+ * open. The desktop server must be bound to 0.0.0.0 (see spawnServer) for
+ * these to be reachable from another device.
+ *
+ * Order is "most-likely-the-café-wifi-first": physical/Wi-Fi adapters sort
+ * before virtual/VPN ones, and we de-duplicate.
+ */
+function getLanAddresses() {
+  const interfaces = os.networkInterfaces();
+  const out = [];
+  const seen = new Set();
+  for (const name of Object.keys(interfaces)) {
+    for (const info of interfaces[name] || []) {
+      if (info.family !== 'IPv4' || info.internal) continue;
+      if (seen.has(info.address)) continue;
+      seen.add(info.address);
+      // Heuristic: physical / Wi-Fi adapters come first on every desktop OS we
+      // support, virtual adapters (Docker, WSL, VPNs, virtual hosts) come last.
+      const isVirtual = /virtual|vmware|hyper-v|hyperv|docker|wsl|veth|tunnel|utun|tap|tun|loopback|pseudo/i.test(name);
+      if (isVirtual) out.push({ address: info.address, interface: name, priority: 1 });
+      else out.push({ address: info.address, interface: name, priority: 0 });
+    }
+  }
+  out.sort((a, b) => a.priority - b.priority);
+  return out;
+}
+
+function buildLanUrls(port) {
+  return getLanAddresses().map((entry) => ({
+    url: `http://${entry.address}:${port}`,
+    address: entry.address,
+    interface: entry.interface,
+  }));
+}
+
+/**
+ * A stable per-machine identifier used for license binding. The hash
+ * inputs (hostname, platform, arch, CPU model, total memory) survive
+ * reboots and minor OS patches but change if the user moves the disk
+ * to a new computer — which is exactly the "this is a different machine"
+ * signal the license server needs. We don't include MAC addresses, disk
+ * serials, or anything else that requires elevated privileges.
+ */
+let cachedFingerprint = null;
+function getMachineFingerprint() {
+  if (cachedFingerprint) return cachedFingerprint;
+  const cpus = os.cpus() || [];
+  const firstCpu = cpus[0] || {};
+  const inputs = [
+    os.hostname(),
+    os.platform(),
+    os.arch(),
+    firstCpu.model || 'unknown-cpu',
+    String(os.totalmem()),
+    String(cpus.length),
+  ];
+  const hash = crypto.createHash('sha256').update(inputs.join('|')).digest('hex');
+  cachedFingerprint = `desktop-${hash.slice(0, 32)}`;
+  return cachedFingerprint;
+}
 
 // ── Local server lifecycle ──────────────────────────────────────────────────
 
@@ -88,11 +158,22 @@ function spawnServer(port) {
       ...process.env,
       ELECTRON_RUN_AS_NODE: '1',
       NODE_ENV: 'production',
-      HOST: '127.0.0.1',
+      // Bind to every interface so customer phones on the same Wi-Fi can
+      // reach the table QR URLs. 127.0.0.1 alone would make the printed QR
+      // codes point at the staff machine's loopback — a phone scanning them
+      // gets "Safari could not connect to the server".
+      HOST: '0.0.0.0',
       PORT: String(port),
       DIST_DIR: distDir(),
       DATA_DIR: dataDir(),
       APP_URL: `http://127.0.0.1:${port}`,
+      // Tells the server it's running inside the packaged desktop app, so
+      // /api/health reports isDesktop=true and the staff console hides the
+      // "set DATABASE_URL in Vercel" tip. DESKTOP_LAN_URLS carries the JSON
+      // list of LAN addresses the server is also listening on, so the QR
+      // codes point at a URL a customer's phone can reach.
+      DESKTOP_APP: '1',
+      DESKTOP_LAN_URLS: JSON.stringify(buildLanUrls(port)),
     },
   });
 
@@ -259,6 +340,33 @@ function buildMenu() {
           click: () => shell.openPath(dataDir()),
         },
         {
+          label: 'Copy LAN address for QR codes',
+          click: () => {
+            const urls = buildLanUrls(serverPort || 0);
+            if (urls.length === 0) {
+              dialog.showMessageBox({
+                type: 'info',
+                title: APP_NAME,
+                message: 'No LAN address detected',
+                detail: 'This machine does not appear to have a Wi-Fi or Ethernet IPv4 address. Connect the staff computer to the café Wi-Fi and choose Console → Restart Local Server.',
+              });
+              return;
+            }
+            const primary = urls[0].url;
+            clipboard.writeText(primary);
+            const detail =
+              urls.length === 1
+                ? `Copied ${primary} to the clipboard.\n\nPrint QR codes from Admin → Tables & QRs. Customer phones on the same Wi-Fi will open the menu at this address.`
+                : `Copied ${primary} to the clipboard. Other addresses on this machine:\n\n${urls.map((u) => `• ${u.url}  (${u.interface})`).join('\n')}\n\nUse the one matching your café Wi-Fi.`;
+            dialog.showMessageBox({
+              type: 'info',
+              title: APP_NAME,
+              message: 'LAN address copied',
+              detail,
+            });
+          },
+        },
+        {
           label: 'Restart Local Server',
           click: () => void restartServerAndReload(),
         },
@@ -280,6 +388,11 @@ ipcMain.handle('desktop:info', () => ({
   electronVersion: process.versions.electron,
   serverPort,
   dataDir: dataDir(),
+  /** Loopback URL the staff window is loaded from. */
+  localUrl: serverPort ? `http://127.0.0.1:${serverPort}` : null,
+  /** Every LAN IPv4 the bundled server is also listening on. The first one
+   *  is the one the printed table QR codes should use. */
+  lanUrls: serverPort ? buildLanUrls(serverPort) : [],
 }));
 
 ipcMain.handle('desktop:open-data-folder', async () => {
@@ -290,6 +403,8 @@ ipcMain.handle('desktop:open-data-folder', async () => {
   }
   return shell.openPath(dataDir());
 });
+
+ipcMain.handle('desktop:machine-fingerprint', () => getMachineFingerprint());
 
 // ── App bootstrap ───────────────────────────────────────────────────────────
 

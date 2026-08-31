@@ -95,3 +95,45 @@ durable order history) and the exact behaviour of `/api/health`.
 | `npm run desktop:stage` | Stage `desktop/app/` without packaging |
 | `npm run desktop:build` | Package Electron desktop installers into `release/` |
 | `npm run desktop:linux` | Build the lightweight no-Electron Linux package (.deb + tar.gz) |
+
+## Distributing the desktop app to paying customers
+
+The desktop installer is shipped the same way Marg / Petpooja / any
+on-premise POS is: customers download a binary, enter a license key
+emailed to them, and the app activates on that machine.
+
+### Build a customer-ready installer
+
+```bash
+# 1. Set the license env vars (one-time per build)
+export LICENSE_REQUIRED=true
+export LICENSE_API_BASE=https://license.yourcompany.com
+export LICENSE_SIGNING_SECRET="$(openssl rand -hex 32)"
+export LICENSE_ALLOW_SELF_ISSUE=false
+
+# 2. Build the installers
+npm run build
+npm run desktop:build
+```
+
+The output in `release/` is a per-platform installer that, on first
+launch, shows a one-screen activation wizard (café name + email +
+license key). The customer cannot use the admin console until the
+key is activated.
+
+### License server endpoints (you host this)
+
+Your license server needs three POST endpoints (request/response
+shapes in `src/server/license.ts`):
+
+- `POST /api/license/activate` — verifies the key, marks it bound
+  to the machine fingerprint, returns a signed JWT.
+- `POST /api/license/heartbeat` — checks key is still active,
+  optionally returns a new token if the plan was extended.
+- `POST /api/license/rebind` — releases the old machine and binds
+  the key to a new fingerprint (requires the original email).
+
+A minimal implementation is a tiny Node/Express service backed by a
+Postgres table of `{ key_id, email, plan, status, fingerprint,
+activated_at, expires_at }`. The signing secret MUST match the one
+baked into the desktop build above.

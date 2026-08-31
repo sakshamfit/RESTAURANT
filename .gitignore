@@ -10,6 +10,7 @@ coverage/
 !.env.example
 data/*.json
 data/*.json.tmp
+data/.license-signing-secret
 api/index.cjs
 api/*.map
 api/*.tmp

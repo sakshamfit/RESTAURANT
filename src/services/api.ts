@@ -122,6 +122,29 @@ export interface BackendHealth {
   };
   dataFile?: string;
   ephemeral?: boolean;
+  /** True when the request is being served by the packaged desktop app. */
+  isDesktop?: boolean;
+  /** Loopback URL the staff console window was loaded from (desktop only). */
+  localUrl?: string | null;
+  /** Every LAN IPv4 the desktop server is also listening on. */
+  lanUrls?: Array<{ url: string; address: string; interface: string }>;
+  /** License state — null when licenses aren't enforced on this build. */
+  licenseRequired?: boolean;
+  license?: {
+    state: 'not-required' | 'missing' | 'invalid' | 'expired' | 'active';
+    reason?: string;
+    gracePeriodEndsAt?: number | null;
+    payload?: {
+      keyId: string;
+      cafeName: string;
+      email: string;
+      plan: string;
+      iat: number;
+      exp: number | null;
+      fingerprint: string;
+      activated: boolean;
+    };
+  };
   /** Process uptime — near-zero on every check means requests keep cold-starting. */
   nodeUptimeSeconds?: number;
   /** Vercel region that served the request (e.g. "iad1"), when deployed there. */

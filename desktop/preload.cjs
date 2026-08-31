@@ -13,4 +13,11 @@ contextBridge.exposeInMainWorld('nagoriDesktop', {
   getInfo: () => ipcRenderer.invoke('desktop:info'),
   /** Opens the folder that holds this machine's orders/menu database. */
   openDataFolder: () => ipcRenderer.invoke('desktop:open-data-folder'),
+  /**
+   * Returns a stable, opaque per-machine identifier used for license
+   * binding. The renderer falls back to a localStorage-backed UUID in
+   * the browser build (see services/license.ts) so the same code works
+   * on both the desktop app and the web.
+   */
+  getMachineFingerprint: () => ipcRenderer.invoke('desktop:machine-fingerprint'),
 });

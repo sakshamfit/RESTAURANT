@@ -464,13 +464,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </div>
       </header>
 
+      {/* License warning banner — only shown in distributed builds where
+          the subscription is expiring or has expired (still inside the
+          7-day grace window). After grace, the admin login is blocked at
+          the server level so this banner is just a heads-up. */}
+      {backendHealth?.license?.state === 'expired' && (
+        <div className="px-4 py-2.5 text-xs font-semibold border-b bg-amber-50 text-amber-800 border-amber-200 flex flex-wrap items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-current animate-pulse shrink-0" />
+          <span>
+            <strong>Subscription expired.</strong> The admin console still works for{' '}
+            {backendHealth.license.gracePeriodEndsAt
+              ? `until ${new Date(backendHealth.license.gracePeriodEndsAt).toLocaleString()}`
+              : 'a short grace period'}
+            . Renew to keep admin access.
+          </span>
+          <a
+            href="https://nexoraosp.com/renew"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto py-1.5 px-3 bg-amber-600 hover:bg-amber-700 text-white font-bold text-[11px] rounded-lg"
+          >
+            Renew now
+          </a>
+        </div>
+      )}
+
       {/* Backend Storage Health Banner (informative — shows where data is saved) */}
       {backendHealth && backendHealth.persistence !== 'postgres' && (
         <div
           className={`px-4 py-2.5 text-xs font-semibold border-b flex flex-wrap items-center gap-2 ${
             backendHealth.postgresConfigured
               ? 'bg-red-50 text-red-800 border-red-200'
-              : 'bg-amber-50 text-amber-800 border-amber-200'
+              : backendHealth.isDesktop
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                : 'bg-amber-50 text-amber-800 border-amber-200'
           }`}
         >
           <span className="w-2 h-2 rounded-full bg-current animate-pulse shrink-0" />
@@ -495,6 +522,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </span>
               )}
             </>
+          ) : backendHealth.isDesktop ? (
+            <span>
+              ✅ Data is stored safely on this machine's local database
+              (<code className="font-mono">data/restaurant.json</code> inside the app's user folder) — it survives
+              restarts and never leaves the computer. No cloud database is required.
+            </span>
           ) : (
             <span>
               💡 Tip: connect a free PostgreSQL database (<code className="font-mono">DATABASE_URL</code>) in Vercel so
