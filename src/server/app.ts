@@ -29,6 +29,56 @@ import {
 
 dotenv.config();
 
+// ── Process-level crash guards ──────────────────────────────────────────────
+// Installed once per process. Express 4 does not catch async errors itself,
+// and on Node 18+ a single rejected handler promise kills the whole backend.
+// Routes are wrapped below, so these are a last-resort net for anything else
+// (timers, listeners, background work). Data safety: every data-file write is
+// atomic (temp file + rename), so keeping the process alive can never corrupt
+// restaurant.json — and an exit would take the whole café floor offline.
+const processGuards = globalThis as { __nexoraCrashGuardsInstalled?: boolean };
+if (!processGuards.__nexoraCrashGuardsInstalled) {
+  processGuards.__nexoraCrashGuardsInstalled = true;
+  process.on('unhandledRejection', (reason) => {
+    console.error(
+      '[process] Unhandled promise rejection (server keeps running):',
+      reason instanceof Error ? reason.stack : reason
+    );
+  });
+  process.on('uncaughtException', (error) => {
+    console.error('[process] Uncaught exception (server keeps running):', error?.stack || error);
+  });
+}
+
+/** Prefix of the cacheable URLs served by GET /api/images/:productId. */
+const IMAGE_URL_PREFIX = '/api/images/';
+
+/**
+ * Wraps a route handler so ANY rejection or throw reaches Express's error
+ * handling (and the JSON error responder) instead of becoming an unhandled
+ * promise rejection that kills the backend process. Express 4 never catches
+ * async errors on its own — one database blip during a dashboard poll was
+ * enough to crash the server without this.
+ */
+function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown> | unknown) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
+
+/**
+ * Product photos live inside each product record as data: URLs. Serving them
+ * through this content-addressed URL (the hash changes when the photo is
+ * replaced) lets browsers cache each photo forever — otherwise every menu load
+ * and every dashboard poll re-downloads the full base64 of every photo.
+ */
+function productImageUrl(product: Product): string {
+  const image = typeof product.image === 'string' ? product.image : '';
+  if (!image.startsWith('data:')) return image;
+  const hash = crypto.createHash('sha256').update(image).digest('hex').slice(0, 12);
+  return `${IMAGE_URL_PREFIX}${encodeURIComponent(product.id)}?v=${hash}`;
+}
+
 // ── Admin sessions ───────────────────────────────────────────────────────────
 // There is exactly one admin and exactly one way to log in: /api/admin/login
 // with the single admin password (stored in data/admin.json locally, or in the
@@ -223,6 +273,9 @@ async function sendWhatsAppNotification(order: Order, settings: CafeSettings): P
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.whatsappApiToken}` },
         body: JSON.stringify({ phone: settings.whatsappNumber, message: messageText, orderId: order.id }),
+        // A slow or hanging gateway must never delay an order: the order is
+        // persisted and confirmed to the customer first, this runs alongside.
+        signal: AbortSignal.timeout(8000),
       });
       if (!response.ok) return { success: false, error: `WhatsApp API error: ${response.status} - ${await response.text()}` };
       return { success: true };
@@ -279,7 +332,7 @@ export function createApp() {
   // ----------------------------------------------------
   // Public customer APIs
   // ----------------------------------------------------
-  app.get('/api/public/tables', async (_req, res) => {
+  app.get('/api/public/tables', asyncRoute(async (_req, res) => {
     try {
       const tables = (await store.list('tables'))
         .filter((table) => table.isActive)
@@ -290,9 +343,9 @@ export function createApp() {
       console.error('Public tables error:', error);
       jsonError(res, 500, 'Unable to load tables from the café database.');
     }
-  });
+  }));
 
-  app.get('/api/table/:token', async (req, res) => {
+  app.get('/api/table/:token', asyncRoute(async (req, res) => {
     try {
       const snapshot = await store.snapshot();
       const table = findTable(snapshot.tables, decodeURIComponent(req.params.token || ''));
@@ -303,15 +356,20 @@ export function createApp() {
         table: { id: table.id, tableNumber: table.tableNumber, name: table.name, token: table.token, isActive: table.isActive, createdAt: table.createdAt },
         settings: publicSettings(snapshot.settings),
         categories: snapshot.categories.sort((a, b) => a.displayOrder - b.displayOrder),
-        products: snapshot.products.filter((product) => product.isAvailable).sort((a, b) => a.displayOrder - b.displayOrder),
+        // Photos are served as cacheable /api/images/... URLs so a phone loads
+        // each photo once instead of re-downloading base64 on every menu open.
+        products: snapshot.products
+          .filter((product) => product.isAvailable)
+          .sort((a, b) => a.displayOrder - b.displayOrder)
+          .map((product) => ({ ...product, image: productImageUrl(product) })),
       });
     } catch (error) {
       console.error('Table menu error:', error);
       jsonError(res, 500, 'Unable to load the menu from the café database.');
     }
-  });
+  }));
 
-  app.get('/api/table/:token/orders', async (req, res) => {
+  app.get('/api/table/:token/orders', asyncRoute(async (req, res) => {
     try {
       const snapshot = await store.snapshot();
       const table = findTable(snapshot.tables, decodeURIComponent(req.params.token || ''));
@@ -324,9 +382,9 @@ export function createApp() {
       console.error('Table orders error:', error);
       jsonError(res, 500, 'Unable to load order history from the café database.');
     }
-  });
+  }));
 
-  app.post('/api/orders', async (req, res) => {
+  app.post('/api/orders', asyncRoute(async (req, res) => {
     try {
       const ip = req.ip || req.socket.remoteAddress || 'unknown';
       const { tableToken, tableId, tableNumber, tableName, customerName, customerPhone, specialInstructions, items, clientRequestId } = req.body || {};
@@ -401,19 +459,30 @@ export function createApp() {
         whatsappNotificationSent: false,
       };
 
-      const whatsappResult = await sendWhatsAppNotification(order, snapshot.settings);
-      order.whatsappNotificationSent = whatsappResult.success;
-      if (whatsappResult.error) order.whatsappNotificationError = whatsappResult.error;
+      // Persist FIRST and confirm to the customer immediately. The WhatsApp
+      // notification used to run (and could hang on a slow gateway) BEFORE the
+      // order was saved — delaying both the kitchen feed and the customer's
+      // confirmation. It now runs alongside, with a hard 8s timeout.
       await store.put('orders', order);
       if (idempotencyKey) rememberRecentOrderRequest(idempotencyKey, order);
+
+      void sendWhatsAppNotification(order, snapshot.settings)
+        .then((result) => {
+          order.whatsappNotificationSent = result.success;
+          order.whatsappNotificationError = result.error;
+          // Best-effort bookkeeping update; the order itself is already saved.
+          return store.put('orders', order).catch(() => undefined);
+        })
+        .catch(() => undefined);
+
       res.status(201).json({ success: true, order, message: 'Order placed successfully!' });
     } catch (error: any) {
       console.error('Order creation error:', error);
       jsonError(res, 500, error?.message || 'Internal server error while placing order.');
     }
-  });
+  }));
 
-  app.get('/api/orders/track/:orderId', async (req, res) => {
+  app.get('/api/orders/track/:orderId', asyncRoute(async (req, res) => {
     try {
       const orders = await store.list('orders');
       const order = orders.find((candidate) => candidate.id === req.params.orderId || candidate.orderNumber === req.params.orderId);
@@ -423,7 +492,7 @@ export function createApp() {
       console.error('Track order error:', error);
       jsonError(res, 500, 'Unable to track the order from the café database.');
     }
-  });
+  }));
 
   // Read-only lookup of the orders placed from one phone. The customer's
   // browser remembers the IDs of the orders it submitted (localStorage) and
@@ -432,7 +501,7 @@ export function createApp() {
   // so this adds no new exposure — it just batches that lookup so the "My
   // Orders" screen on the customer's phone can show every order they placed,
   // across tables and past visits, with the date it was placed.
-  app.post('/api/orders/lookup', async (req, res) => {
+  app.post('/api/orders/lookup', asyncRoute(async (req, res) => {
     try {
       const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : [];
       const wanted = new Set(
@@ -452,9 +521,9 @@ export function createApp() {
       console.error('Order lookup error:', error);
       jsonError(res, 500, 'Unable to load your orders from the café database.');
     }
-  });
+  }));
 
-  app.post('/api/waiter-call', async (req, res) => {
+  app.post('/api/waiter-call', asyncRoute(async (req, res) => {
     try {
       const { tableToken, tableId, tableNumber, tableName, customerName } = req.body || {};
       const tables = await store.list('tables');
@@ -476,9 +545,9 @@ export function createApp() {
       console.error('Waiter call error:', error);
       jsonError(res, 500, 'Failed to notify waiter.');
     }
-  });
+  }));
 
-  app.post('/api/feedback', async (req, res) => {
+  app.post('/api/feedback', asyncRoute(async (req, res) => {
     try {
       const { orderId, orderNumber, tableNumber, tableName, customerName, rating, comment } = req.body || {};
       if (!rating || Number(rating) < 1 || Number(rating) > 5) return jsonError(res, 400, 'Rating must be between 1 and 5 stars.');
@@ -499,13 +568,13 @@ export function createApp() {
       console.error('Feedback submit error:', error);
       jsonError(res, 500, 'Failed to submit feedback.');
     }
-  });
+  }));
 
   // ----------------------------------------------------
   // Single admin login + protected admin APIs
   // ----------------------------------------------------
   // The one and only login: the single admin password. No cloud auth service.
-  app.post('/api/admin/login', (req, res) => {
+  app.post('/api/admin/login', asyncRoute((req, res) => {
     const configurationError = getAdminAuthConfigurationError();
     if (configurationError) return jsonError(res, 503, configurationError);
 
@@ -530,11 +599,11 @@ export function createApp() {
       expiresAt: new Date(Date.now() + ADMIN_SESSION_TTL_MS).toISOString(),
       admin: { email: adminEmail },
     });
-  });
+  }));
 
-  app.get('/api/admin/me', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
+  app.get('/api/admin/me', requireAdminAuth, asyncRoute(async (req: Request & { adminUser?: { email?: string } }, res) => {
     res.json({ email: req.adminUser?.email || adminEmail, cafeName: (await store.getSettings()).cafeName });
-  });
+  }));
 
   // Sessions are stateless (signed tokens), so logging out is a client-side
   // token removal; the token itself simply expires after its 7-day lifetime.
@@ -542,7 +611,7 @@ export function createApp() {
     res.json({ success: true });
   });
 
-  app.get('/api/admin/orders', requireAdminAuth, async (req, res) => {
+  app.get('/api/admin/orders', requireAdminAuth, asyncRoute(async (req, res) => {
     try {
       // `scope=all-tables` is the read-only feed used by the admin dashboard's
       // live order alerts. It deliberately ignores status/table filters so Table 1,
@@ -561,9 +630,9 @@ export function createApp() {
       console.error('Admin orders error:', error);
       jsonError(res, 500, 'Failed to fetch orders from the café database.');
     }
-  });
+  }));
 
-  app.patch('/api/admin/orders/:id/status', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/orders/:id/status', requireAdminAuth, asyncRoute(async (req, res) => {
     try {
       const order = await store.get('orders', req.params.id);
       if (!order) return jsonError(res, 404, 'Order not found.');
@@ -583,9 +652,9 @@ export function createApp() {
       console.error('Order status error:', error);
       jsonError(res, 500, 'Failed to update order status.');
     }
-  });
+  }));
 
-  app.patch('/api/admin/orders/:id/payment', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/orders/:id/payment', requireAdminAuth, asyncRoute(async (req, res) => {
     try {
       const order = await store.get('orders', req.params.id);
       if (!order) return jsonError(res, 404, 'Order not found.');
@@ -598,13 +667,33 @@ export function createApp() {
       console.error('Payment status error:', error);
       jsonError(res, 500, 'Failed to update payment status.');
     }
-  });
+  }));
 
-  app.get('/api/admin/products', requireAdminAuth, async (_req, res) => {
-    res.json({ products: (await store.list('products')).sort((a, b) => a.displayOrder - b.displayOrder) });
-  });
+  // Product photos, served as cacheable bytes. Photos are stored inside each
+  // product record as data: URLs; without this endpoint every menu load and
+  // every dashboard poll re-downloaded the full base64 of every photo
+  // (megabytes on a photographed menu — a major source of lag). Browsers now
+  // fetch each photo once and cache it immutably; the ?v= hash changes
+  // whenever a photo is replaced.
+  app.get('/api/images/:productId', asyncRoute(async (req, res) => {
+    const product = await store.get('products', String(req.params.productId || ''));
+    const image = typeof product?.image === 'string' ? product.image : '';
+    const match = image.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/);
+    if (!match) return jsonError(res, 404, 'Image not found.');
+    const bytes = Buffer.from(match[2], 'base64');
+    if (bytes.length === 0) return jsonError(res, 404, 'Image not found.');
+    res.set('Content-Type', match[1]);
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.set('ETag', `"${crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 24)}"`);
+    res.send(bytes);
+  }));
 
-  app.post('/api/admin/products', requireAdminAuth, async (req, res) => {
+  app.get('/api/admin/products', requireAdminAuth, asyncRoute(async (_req, res) => {
+    const products = (await store.list('products')).sort((a, b) => a.displayOrder - b.displayOrder);
+    res.json({ products: products.map((product) => ({ ...product, image: productImageUrl(product) })) });
+  }));
+
+  app.post('/api/admin/products', requireAdminAuth, asyncRoute(async (req, res) => {
     try {
       const body = req.body || {};
       const timestamp = new Date().toISOString();
@@ -626,19 +715,22 @@ export function createApp() {
         updatedAt: timestamp,
       };
       await store.put('products', product);
-      res.status(201).json({ success: true, product });
+      res.status(201).json({ success: true, product: { ...product, image: productImageUrl(product) } });
     } catch (error: any) {
       console.error('Create product error:', error);
       jsonError(res, 500, error?.message || 'Failed to add product.');
     }
-  });
+  }));
 
-  app.put('/api/admin/products/:id', requireAdminAuth, async (req, res) => {
+  app.put('/api/admin/products/:id', requireAdminAuth, asyncRoute(async (req, res) => {
     try {
       const existing = await store.get('products', req.params.id);
       if (!existing) return jsonError(res, 404, 'Product not found.');
       const body = req.body || {};
       let image = body.image !== undefined ? body.image : existing.image;
+      // The UI sends back the cacheable /api/images/... URL when the photo was
+      // NOT changed — keep the stored data URL instead of saving the proxy.
+      if (typeof image === 'string' && image.startsWith(IMAGE_URL_PREFIX)) image = existing.image;
       if (typeof image === 'string' && image.startsWith('data:image/')) image = await store.uploadImage(image, existing.id);
       const product: Product = {
         ...existing,
@@ -650,38 +742,38 @@ export function createApp() {
         variants: Array.isArray(body.variants) ? body.variants : existing.variants,
       };
       await store.put('products', product);
-      res.json({ success: true, product });
+      res.json({ success: true, product: { ...product, image: productImageUrl(product) } });
     } catch (error: any) {
       console.error('Edit product error:', error);
       jsonError(res, 500, error?.message || 'Failed to update product.');
     }
-  });
+  }));
 
-  app.patch('/api/admin/products/:id/availability', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/products/:id/availability', requireAdminAuth, asyncRoute(async (req, res) => {
     const product = await store.get('products', req.params.id);
     if (!product) return jsonError(res, 404, 'Product not found.');
     const updated = { ...product, isAvailable: !product.isAvailable, updatedAt: new Date().toISOString() };
     await store.put('products', updated);
-    res.json({ success: true, product: updated });
-  });
+    res.json({ success: true, product: { ...updated, image: productImageUrl(updated) } });
+  }));
 
-  app.delete('/api/admin/products/:id', requireAdminAuth, async (req, res) => {
+  app.delete('/api/admin/products/:id', requireAdminAuth, asyncRoute(async (req, res) => {
     const product = await store.get('products', req.params.id);
     if (!product) return jsonError(res, 404, 'Product not found.');
     await store.remove('products', req.params.id);
     res.json({ success: true });
-  });
+  }));
 
-  app.get('/api/admin/tables', requireAdminAuth, async (_req, res) => {
+  app.get('/api/admin/tables', requireAdminAuth, asyncRoute(async (_req, res) => {
     const snapshot = await store.snapshot();
     const tables = snapshot.tables.map((table) => ({
       ...table,
       activeOrder: snapshot.orders.find((order) => order.tableId === table.id && ['new', 'accepted', 'ready'].includes(order.status)) || null,
     }));
     res.json({ tables });
-  });
+  }));
 
-  app.post('/api/admin/tables', requireAdminAuth, async (req, res) => {
+  app.post('/api/admin/tables', requireAdminAuth, asyncRoute(async (req, res) => {
     const tableNumber = Number(req.body?.tableNumber);
     if (!Number.isFinite(tableNumber) || tableNumber <= 0) return jsonError(res, 400, 'Valid table number is required.');
     const tables = await store.list('tables');
@@ -696,45 +788,45 @@ export function createApp() {
     };
     await store.put('tables', table);
     res.status(201).json({ success: true, table });
-  });
+  }));
 
-  app.patch('/api/admin/tables/:id/toggle', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/tables/:id/toggle', requireAdminAuth, asyncRoute(async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     const updated = { ...table, isActive: !table.isActive };
     await store.put('tables', updated);
     res.json({ success: true, table: updated });
-  });
+  }));
 
-  app.patch('/api/admin/tables/:id/regenerate-token', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/tables/:id/regenerate-token', requireAdminAuth, asyncRoute(async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     const updated = { ...table, token: `nexoraosp_tbl_tok_table${table.tableNumber}_${crypto.randomBytes(6).toString('hex')}` };
     await store.put('tables', updated);
     res.json({ success: true, table: updated });
-  });
+  }));
 
-  app.delete('/api/admin/tables/:id', requireAdminAuth, async (req, res) => {
+  app.delete('/api/admin/tables/:id', requireAdminAuth, asyncRoute(async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     await store.remove('tables', req.params.id);
     res.json({ success: true });
-  });
+  }));
 
-  app.get('/api/admin/categories', requireAdminAuth, async (_req, res) => {
+  app.get('/api/admin/categories', requireAdminAuth, asyncRoute(async (_req, res) => {
     res.json({ categories: (await store.list('categories')).sort((a, b) => a.displayOrder - b.displayOrder) });
-  });
+  }));
 
-  app.post('/api/admin/categories', requireAdminAuth, async (req, res) => {
+  app.post('/api/admin/categories', requireAdminAuth, asyncRoute(async (req, res) => {
     const name = getIdentifier(req.body?.name);
     if (!name) return jsonError(res, 400, 'Category name is required.');
     const categories = await store.list('categories');
     const category: CafeCategory = { id: newId('cat'), name, displayOrder: categories.length + 1 };
     await store.put('categories', category);
     res.status(201).json({ success: true, category });
-  });
+  }));
 
-  app.put('/api/admin/categories/:id', requireAdminAuth, async (req, res) => {
+  app.put('/api/admin/categories/:id', requireAdminAuth, asyncRoute(async (req, res) => {
     const name = getIdentifier(req.body?.name);
     if (!name) return jsonError(res, 400, 'Valid category name is required.');
     const category = await store.get('categories', req.params.id);
@@ -745,37 +837,37 @@ export function createApp() {
     await store.put('categories', updatedCategory);
     await Promise.all(products.filter((product) => product.category.toLowerCase() === oldName.toLowerCase()).map((product) => store.put('products', { ...product, category: name, updatedAt: new Date().toISOString() })));
     res.json({ success: true, category: updatedCategory, updatedProductsCount: products.filter((product) => product.category.toLowerCase() === oldName.toLowerCase()).length });
-  });
+  }));
 
-  app.delete('/api/admin/categories/:id', requireAdminAuth, async (req, res) => {
+  app.delete('/api/admin/categories/:id', requireAdminAuth, asyncRoute(async (req, res) => {
     const category = await store.get('categories', req.params.id);
     if (!category) return jsonError(res, 404, 'Category not found.');
     await store.remove('categories', req.params.id);
     res.json({ success: true });
-  });
+  }));
 
-  app.get('/api/admin/waiter-calls', requireAdminAuth, async (_req, res) => {
+  app.get('/api/admin/waiter-calls', requireAdminAuth, asyncRoute(async (_req, res) => {
     const calls = (await store.list('waiterCalls')).sort((a, b) => new Date(b.calledAt || b.createdAt || 0).getTime() - new Date(a.calledAt || a.createdAt || 0).getTime());
     res.json({ calls });
-  });
+  }));
 
-  app.patch('/api/admin/waiter-calls/:id/attend', requireAdminAuth, async (req, res) => {
+  app.patch('/api/admin/waiter-calls/:id/attend', requireAdminAuth, asyncRoute(async (req, res) => {
     const call = await store.get('waiterCalls', req.params.id);
     if (!call) return jsonError(res, 404, 'Waiter call not found.');
     const updated = { ...call, status: 'attended' as const, attendedAt: new Date().toISOString() };
     await store.put('waiterCalls', updated);
     res.json({ success: true, call: updated });
-  });
+  }));
 
-  app.get('/api/admin/feedbacks', requireAdminAuth, async (_req, res) => {
+  app.get('/api/admin/feedbacks', requireAdminAuth, asyncRoute(async (_req, res) => {
     const feedbacks = (await store.list('feedbacks')).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     const averageRating = feedbacks.length ? Number((feedbacks.reduce((sum, item) => sum + item.rating, 0) / feedbacks.length).toFixed(1)) : 0;
     const ratingDistribution: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
     feedbacks.forEach((item) => { const rating = Math.max(1, Math.min(5, Math.round(item.rating))); ratingDistribution[rating] += 1; });
     res.json({ feedbacks, averageRating, totalFeedbacks: feedbacks.length, ratingDistribution });
-  });
+  }));
 
-  app.get('/api/admin/reports', requireAdminAuth, async (req, res) => {
+  app.get('/api/admin/reports', requireAdminAuth, asyncRoute(async (req, res) => {
     const { range = 'today', startDate, endDate } = req.query;
     // The dashboard sends its timezone offset so day ranges follow the
     // operator's local clock: "Today" starts at THEIR 12:00 AM, not the
@@ -828,24 +920,24 @@ export function createApp() {
       recentOrders: orders.sort((a, b) => new Date(b.timeline.createdAt).getTime() - new Date(a.timeline.createdAt).getTime()).slice(0, 10),
     };
     res.json({ summary });
-  });
+  }));
 
-  app.get('/api/admin/settings', requireAdminAuth, async (req: Request & { adminUser?: { email?: string } }, res) => {
+  app.get('/api/admin/settings', requireAdminAuth, asyncRoute(async (req: Request & { adminUser?: { email?: string } }, res) => {
     res.json({ settings: await store.getSettings(), adminEmail: req.adminUser?.email || adminEmail });
-  });
+  }));
 
-  app.put('/api/admin/settings', requireAdminAuth, async (req, res) => {
+  app.put('/api/admin/settings', requireAdminAuth, asyncRoute(async (req, res) => {
     const updates = req.body;
     if (!updates || typeof updates !== 'object') return jsonError(res, 400, 'Invalid settings payload.');
     const settings = { ...(await store.getSettings()), ...updates };
     await store.putSettings(settings);
     res.json({ success: true, settings });
-  });
+  }));
 
   // Change the single admin password. It is saved to the active credential
   // store (data/admin.json locally, database on Vercel) and takes effect
   // immediately — no restart and no cloud auth service needed.
-  app.post('/api/admin/change-password', requireAdminAuth, async (req, res) => {
+  app.post('/api/admin/change-password', requireAdminAuth, asyncRoute(async (req, res) => {
     try {
       const currentPassword = getIdentifier(req.body?.currentPassword);
       const newPassword = getIdentifier(req.body?.newPassword);
@@ -856,6 +948,34 @@ export function createApp() {
       console.error('Change password error:', error);
       jsonError(res, 500, error?.message || 'Failed to update the admin password.');
     }
+  }));
+
+  // ── Global JSON error responder ────────────────────────────────────────────
+  // Final safety net for every route (see asyncRoute): a storage hiccup or an
+  // unexpected throw becomes ONE logged line and a clean JSON error for the
+  // client — never an unhandled rejection that kills the backend process, and
+  // never an HTML error page the app cannot parse.
+  app.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
+    const err = error as { status?: number; statusCode?: number; expose?: boolean; type?: string; message?: string; stack?: string };
+    // Body-parser failures (malformed JSON, oversized body): expose the
+    // parser's own 4xx status instead of a generic 500.
+    const status = typeof err?.status === 'number' ? err.status : typeof err?.statusCode === 'number' ? err.statusCode : undefined;
+    if (status !== undefined && status >= 400 && status < 500 && err?.expose) {
+      const message =
+        err?.type === 'entity.parse.failed'
+          ? 'Request body is not valid JSON.'
+          : err?.type === 'entity.too.large'
+            ? 'Request body is too large.'
+            : err?.message || 'Bad request.';
+      return jsonError(res, status, message);
+    }
+    if (res.headersSent) {
+      // Express already streamed a response — its default handler closes the
+      // connection cleanly; nothing more we can send.
+      return next(error);
+    }
+    console.error(`[api] Unhandled error on ${req.method} ${req.originalUrl}:`, err?.stack || error);
+    jsonError(res, 500, 'The server hit an unexpected error handling this request. It has been logged and the app keeps running — please retry.');
   });
 
   return app;
