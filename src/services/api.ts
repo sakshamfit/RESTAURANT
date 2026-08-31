@@ -239,6 +239,24 @@ export const api = {
     return res.json();
   },
 
+  /**
+   * Fetch every order placed from this device, by the order IDs the phone
+   * saved when submitting them (read-only). Works across tables and past
+   * visits, so "My Orders" always shows the customer their own history.
+   */
+  async getMyOrdersByIds(ids: string[]): Promise<{ orders: Order[] }> {
+    const res = await fetchWithRetry(`${API_BASE}/orders/lookup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Failed to load your orders.');
+    }
+    return res.json();
+  },
+
   async callWaiter(payload: {
     tableToken?: string;
     tableId?: string;
@@ -619,6 +637,9 @@ export const api = {
   // Admin Reports
   async adminGetReports(range = 'today', startDate?: string, endDate?: string): Promise<{ summary: SalesSummary }> {
     const params = new URLSearchParams({ range });
+    // Day boundaries must follow the operator's local calendar day so "Today"
+    // resets at their 12:00 AM even when the server runs in UTC.
+    params.append('tzOffsetMinutes', String(new Date().getTimezoneOffset()));
     if (startDate) params.append('startDate', startDate);
     if (endDate) params.append('endDate', endDate);
 

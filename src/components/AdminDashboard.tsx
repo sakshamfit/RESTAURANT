@@ -216,40 +216,69 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const spokenAlertsAvailable = isSpokenAlertSupported();
 
-  const fetchAllData = async (isInitial = false) => {
+  /**
+   * The live kitchen feed: only the two light endpoints that actually change
+   * minute-to-minute. This is what the 5-second poll hits — no product
+   * catalogue, no photos, so each tick stays small and fast.
+   */
+  const fetchLiveData = async () => {
     try {
-      if (isInitial) setLoading(true);
-
-      const [ordersRes, waiterCallsRes, productsRes, tablesRes, categoriesRes, settingsRes] = await Promise.all([
+      const [ordersRes, waiterCallsRes] = await Promise.all([
         // No table filter is sent here: this is the all-table source used for
         // live Table 1 / 2 / 3 (and future table) order detection.
         api.adminGetAllTableOrders(),
         api.adminGetWaiterCalls(),
-        api.adminGetProducts(),
-        api.adminGetTables(),
-        api.adminGetCategories(),
-        api.adminGetSettings(),
       ]);
-
-      // Backend storage health is informative only — never block the dashboard on it.
-      api
-        .getHealth()
-        .then((health) => setBackendHealth(health))
-        .catch(() => setBackendHealth(null));
 
       applyAllTableOrders(ordersRes.orders);
       const latestCalls = waiterCallsRes.calls || [];
       setWaiterCalls(latestCalls);
       applyWaiterCalls(latestCalls);
+    } catch (err: any) {
+      console.error('Failed to sync live order feed:', err);
+    }
+  };
+
+  /**
+   * Reference data (menu, tables, categories, settings) changes rarely, so it
+   * is refreshed every 30 seconds instead of on every 5-second tick.
+   * Re-downloading the whole catalogue (photos included) on every poll loaded
+   * the backend and made the dashboard feel laggy on busy services.
+   */
+  const fetchReferenceData = async (isInitial = false) => {
+    try {
+      if (isInitial) setLoading(true);
+      const [productsRes, tablesRes, categoriesRes, settingsRes] = await Promise.all([
+        api.adminGetProducts(),
+        api.adminGetTables(),
+        api.adminGetCategories(),
+        api.adminGetSettings(),
+      ]);
       setProducts(productsRes.products);
       setTables(tablesRes.tables);
       setCategories(categoriesRes.categories);
       setSettings(settingsRes.settings);
     } catch (err: any) {
-      console.error('Failed to sync admin data:', err);
+      console.error('Failed to sync dashboard data:', err);
     } finally {
       if (isInitial) setLoading(false);
     }
+  };
+
+  const refreshBackendHealth = () => {
+    // Backend storage health is informative only — never block the dashboard on it.
+    api
+      .getHealth()
+      .then((health) => setBackendHealth(health))
+      .catch(() => setBackendHealth(null));
+  };
+
+  /** Full sync — used on open and for manual refreshes after edits. */
+  const fetchAllData = async (isInitial = false) => {
+    if (isInitial) setLoading(true);
+    await Promise.all([fetchLiveData(), fetchReferenceData(false)]);
+    refreshBackendHealth();
+    if (isInitial) setLoading(false);
   };
 
   useEffect(() => {
@@ -278,16 +307,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         .catch(() => { /* ignore — feature unavailable */ });
     }
 
-    // Poll the all-table admin endpoint on the existing dashboard cadence.
     // Polling keeps this compatible with local file storage and serverless
     // deployments while automatically catching orders and waiter calls from
-    // every table.
-    const interval = window.setInterval(() => {
-      fetchAllData(false);
+    // every table. Split by how often data actually changes, so the backend is
+    // never busy re-serving the full catalogue on every tick:
+    //   - live kitchen feed (orders + waiter calls): every 5 seconds
+    //   - menu / tables / settings reference data:   every 30 seconds
+    //   - backend storage health:                    every 60 seconds
+    const liveInterval = window.setInterval(() => {
+      fetchLiveData();
     }, 5_000);
 
+    const referenceInterval = window.setInterval(() => {
+      fetchReferenceData(false);
+    }, 30_000);
+
+    const healthInterval = window.setInterval(refreshBackendHealth, 60_000);
+
     return () => {
-      window.clearInterval(interval);
+      window.clearInterval(liveInterval);
+      window.clearInterval(referenceInterval);
+      window.clearInterval(healthInterval);
       window.removeEventListener('pointerdown', warmAudio);
       window.removeEventListener('keydown', warmAudio);
       stopSpokenAlerts();
@@ -509,40 +549,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <strong>Free trial.</strong> You have{' '}
             {Math.max(0, Math.ceil((backendHealth.license.payload.exp - Date.now()) / (24 * 60 * 60 * 1000)))}{' '}
             day{Math.max(0, Math.ceil((backendHealth.license.payload.exp - Date.now()) / (24 * 60 * 60 * 1000))) === 1 ? '' : 's'} left.
-            Subscribe to keep your data and the admin console.
+            {' '}Subscribe to keep your data and the admin console.
           </span>
           <a
             href="https://nexoraosp.com/subscribe"
             target="_blank"
             rel="noopener noreferrer"
-            className="ml-auto py-1.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] rounded-lg"
+            className="ml-auto px-3 py-1 rounded-md bg-emerald-600 text-white font-bold hover:bg-emerald-700 transition"
           >
-            Subscribe now
-          </a>
-        </div>
-      )}
-
-      {/* License warning banner — only shown in distributed builds where
-          the subscription is expiring or has expired (still inside the
-          7-day grace window). After grace, the admin login is blocked at
-          the server level so this banner is just a heads-up. */}
-      {backendHealth?.license?.state === 'expired' && (
-        <div className="px-4 py-2.5 text-xs font-semibold border-b bg-amber-50 text-amber-800 border-amber-200 flex flex-wrap items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-current animate-pulse shrink-0" />
-          <span>
-            <strong>Subscription expired.</strong> The admin console still works for{' '}
-            {backendHealth.license.gracePeriodEndsAt
-              ? `until ${new Date(backendHealth.license.gracePeriodEndsAt).toLocaleString()}`
-              : 'a short grace period'}
-            . Renew to keep admin access.
-          </span>
-          <a
-            href="https://nexoraosp.com/renew"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-auto py-1.5 px-3 bg-amber-600 hover:bg-amber-700 text-white font-bold text-[11px] rounded-lg"
-          >
-            Renew now
+            Subscribe
           </a>
         </div>
       )}
@@ -553,9 +568,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           className={`px-4 py-2.5 text-xs font-semibold border-b flex flex-wrap items-center gap-2 ${
             backendHealth.postgresConfigured
               ? 'bg-red-50 text-red-800 border-red-200'
-              : backendHealth.isDesktop
-                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                : 'bg-amber-50 text-amber-800 border-amber-200'
+              : 'bg-amber-50 text-amber-800 border-amber-200'
           }`}
         >
           <span className="w-2 h-2 rounded-full bg-current animate-pulse shrink-0" />
@@ -580,12 +593,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </span>
               )}
             </>
-          ) : backendHealth.isDesktop ? (
-            <span>
-              ✅ Data is stored safely on this machine's local database
-              (<code className="font-mono">data/restaurant.json</code> inside the app's user folder) — it survives
-              restarts and never leaves the computer. No cloud database is required.
-            </span>
           ) : (
             <span>
               💡 Tip: connect a free PostgreSQL database (<code className="font-mono">DATABASE_URL</code>) in Vercel so

@@ -393,9 +393,15 @@ export class RestaurantStore {
   private usePostgres = postgresConfigured;
   private memory: DataFile;
   private ephemeral = false;
-  /** Serializes disk writes: at most one write is in flight, the rest coalesce. */
-  private writeQueue: Promise<void> = Promise.resolve();
-  private inFlightWrite: Promise<void> | null = null;
+  /**
+   * Waiters for persist() calls whose change has not been flushed to disk yet.
+   * A waiter is released only by a flush that serialized its version — or by a
+   * failed flush attempt covering it (the change stays in memory and the
+   * backoff retry persists it as soon as the disk recovers).
+   */
+  private persistWaiters: Array<{ version: number; resolve: () => void }> = [];
+  /** True while the flush loop is running, so concurrent writes coalesce. */
+  private flushLoopRunning = false;
   private writeSequence = 0;
   private persistFailures = 0;
   private persistRetry: ReturnType<typeof setTimeout> | null = null;
@@ -499,37 +505,63 @@ export class RestaurantStore {
   }
 
   /**
-   * Serializes every disk write. Concurrent callers share a single flush of the
-   * latest state instead of each racing to rewrite the file, so the file always
-   * ends up holding the newest snapshot and is never left half-written.
+   * Resolves once this caller's change has actually been serialized to
+   * data/restaurant.json — or a flush attempt covering it has failed (the
+   * change is still safely in memory and the backoff retry will persist it).
+   *
+   * Previously, a mutation that landed while an OLDER flush was already in
+   * flight resolved as soon as that older flush finished — i.e. before its own
+   * data was on disk. A crash in that window silently dropped the last
+   * order(s); awaiting put() now genuinely means "durable".
    */
   private persist(): Promise<void> {
     if (this.ephemeral) return Promise.resolve();
-    // Every call means "memory now holds something newer than the file". If a
-    // write is already in flight it captured the older state, so the version
-    // check below re-flushes once it settles.
     this.memoryVersion += 1;
-    if (this.inFlightWrite) return this.inFlightWrite;
-
-    const flush = this.writeQueue.then(() => this.writeSnapshot());
-    // `flush` never rejects (writeSnapshot handles its own errors), so chaining
-    // the next write behind the settled one keeps the queue moving.
-    const settled = flush.then((wrote) => {
-      this.inFlightWrite = null;
-      // A mutation landed while that write was in flight: flush again, so the
-      // newest state is what ends up on disk and awaiting persist() really does
-      // mean "durable". Only after a *successful* write — a failed one is
-      // retried by schedulePersistRetry, never in a hot loop.
-      if (wrote && this.memoryVersion !== this.persistedVersion) void this.persist();
+    const version = this.memoryVersion;
+    return new Promise<void>((resolve) => {
+      this.persistWaiters.push({ version, resolve });
+      this.kickFlushLoop();
     });
-    this.inFlightWrite = settled;
-    this.writeQueue = settled;
-    // Callers await this to know their change reached the disk.
-    return flush.then(() => undefined);
   }
 
-  private async writeSnapshot(): Promise<boolean> {
-    if (this.ephemeral) return false;
+  /**
+   * Single flush loop: at most one disk write is in flight at a time, all
+   * concurrent mutations coalesce into shared flushes, and the loop keeps
+   * going until the file holds the newest memory state.
+   */
+  private kickFlushLoop(): void {
+    if (this.flushLoopRunning) return;
+    this.flushLoopRunning = true;
+    void (async () => {
+      try {
+        while (!this.ephemeral && (this.persistWaiters.length > 0 || this.memoryVersion !== this.persistedVersion)) {
+          const attempt = await this.writeSnapshot();
+          // Release every waiter covered by the version this attempt
+          // serialized. On success their data is on disk; on failure it is
+          // still in memory and schedulePersistRetry() will flush it —
+          // callers are never left hanging on a broken disk.
+          const covered = attempt.version;
+          this.persistWaiters = this.persistWaiters.filter((waiter) => {
+            if (waiter.version <= covered) {
+              waiter.resolve();
+              return false;
+            }
+            return true;
+          });
+          if (!attempt.wrote) break; // failed: retry with backoff, never a hot loop
+        }
+      } finally {
+        this.flushLoopRunning = false;
+      }
+      // Mutations may have landed while the loop was finishing.
+      if (!this.ephemeral && (this.persistWaiters.length > 0 || this.memoryVersion !== this.persistedVersion)) {
+        this.kickFlushLoop();
+      }
+    })();
+  }
+
+  private async writeSnapshot(): Promise<{ version: number; wrote: boolean }> {
+    if (this.ephemeral) return { version: this.persistedVersion, wrote: false };
     const tmpPath = this.nextTmpPath();
     // Captured before stringify: JSON.stringify is synchronous, so this is the
     // exact version of the state that ends up in the file.
@@ -547,11 +579,11 @@ export class RestaurantStore {
       await fs.promises.rename(tmpPath, DATA_FILE);
       this.persistedVersion = version;
       this.persistFailures = 0;
-      return true;
+      return { version, wrote: true };
     } catch (error) {
       await fs.promises.rm(tmpPath, { force: true }).catch(() => undefined);
       this.handlePersistFailure(error);
-      return false;
+      return { version, wrote: false };
     }
   }
 
@@ -561,6 +593,12 @@ export class RestaurantStore {
 
     if (isFatalPersistError(error)) {
       this.ephemeral = true;
+      // Release every pending writer: this store can never flush again, and
+      // hanging each future request would take the whole café offline. The
+      // data itself stays in memory.
+      const waiters = this.persistWaiters;
+      this.persistWaiters = [];
+      waiters.forEach((waiter) => waiter.resolve());
       console.error(
         `[store] Cannot write ${DATA_FILE} (${message}). Running in memory only — changes are lost on restart. Set DATABASE_URL for durable storage.`
       );
@@ -583,7 +621,7 @@ export class RestaurantStore {
     const delay = Math.min(30_000, 500 * 2 ** Math.min(this.persistFailures, 6));
     this.persistRetry = setTimeout(() => {
       this.persistRetry = null;
-      void this.persist();
+      this.kickFlushLoop(); // flush without adding a waiter
     }, delay);
     this.persistRetry.unref?.();
   }

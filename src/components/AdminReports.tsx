@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { SalesSummary, CafeSettings } from '../types';
 import { api } from '../services/api';
+import { useToday } from '../utils/useToday';
 
 interface AdminReportsProps {
   settings: CafeSettings;
@@ -21,6 +22,10 @@ export const AdminReports: React.FC<AdminReportsProps> = ({ settings }) => {
   const [range, setRange] = useState<string>('today');
   const [summary, setSummary] = useState<SalesSummary | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+
+  // Re-renders at 12:00 AM local time: a dashboard left open overnight
+  // refetches "Today" automatically, so the report resets with the new day.
+  const today = useToday();
 
   const fetchReports = async (selectedRange: string) => {
     try {
@@ -36,7 +41,7 @@ export const AdminReports: React.FC<AdminReportsProps> = ({ settings }) => {
 
   useEffect(() => {
     fetchReports(range);
-  }, [range]);
+  }, [range, today]);
 
   const handleExportCSV = () => {
     if (!summary || summary.recentOrders.length === 0) {

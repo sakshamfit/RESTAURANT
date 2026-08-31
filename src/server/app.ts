@@ -20,6 +20,7 @@ import type {
 } from '../types.js';
 import { store, postgresConfigured, newId } from './store.js';
 import { initialSettings } from './seed.js';
+import { parseTimezoneOffsetMinutes, startOfDayInZone, startOfMonthInZone } from './dates.js';
 import {
   changeAdminPassword,
   getAdminAuthConfigurationError,
@@ -41,6 +42,56 @@ import {
 import { auditMiddleware } from './audit.js';
 
 dotenv.config();
+
+// ── Process-level crash guards ──────────────────────────────────────────────
+// Installed once per process. Express 4 does not catch async errors itself,
+// and on Node 18+ a single rejected handler promise kills the whole backend.
+// Routes are wrapped below, so these are a last-resort net for anything else
+// (timers, listeners, background work). Data safety: every data-file write is
+// atomic (temp file + rename), so keeping the process alive can never corrupt
+// restaurant.json — and an exit would take the whole café floor offline.
+const processGuards = globalThis as { __nexoraCrashGuardsInstalled?: boolean };
+if (!processGuards.__nexoraCrashGuardsInstalled) {
+  processGuards.__nexoraCrashGuardsInstalled = true;
+  process.on('unhandledRejection', (reason) => {
+    console.error(
+      '[process] Unhandled promise rejection (server keeps running):',
+      reason instanceof Error ? reason.stack : reason
+    );
+  });
+  process.on('uncaughtException', (error) => {
+    console.error('[process] Uncaught exception (server keeps running):', error?.stack || error);
+  });
+}
+
+/** Prefix of the cacheable URLs served by GET /api/images/:productId. */
+const IMAGE_URL_PREFIX = '/api/images/';
+
+/**
+ * Wraps a route handler so ANY rejection or throw reaches Express's error
+ * handling (and the JSON error responder) instead of becoming an unhandled
+ * promise rejection that kills the backend process. Express 4 never catches
+ * async errors on its own — one database blip during a dashboard poll was
+ * enough to crash the server without this.
+ */
+function asyncRoute(handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown> | unknown) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
+
+/**
+ * Product photos live inside each product record as data: URLs. Serving them
+ * through this content-addressed URL (the hash changes when the photo is
+ * replaced) lets browsers cache each photo forever — otherwise every menu load
+ * and every dashboard poll re-downloads the full base64 of every photo.
+ */
+function productImageUrl(product: Product): string {
+  const image = typeof product.image === 'string' ? product.image : '';
+  if (!image.startsWith('data:')) return image;
+  const hash = crypto.createHash('sha256').update(image).digest('hex').slice(0, 12);
+  return `${IMAGE_URL_PREFIX}${encodeURIComponent(product.id)}?v=${hash}`;
+}
 
 // ── Admin sessions ───────────────────────────────────────────────────────────
 // There is exactly one admin and exactly one way to log in: /api/admin/login
@@ -190,29 +241,6 @@ function publicSettings(settings: CafeSettings) {
   };
 }
 
-/**
- * Parse the JSON list of LAN addresses the desktop shell writes into
- * DESKTOP_LAN_URLS. Defensive: the renderer never crashes if the env var is
- * missing or malformed — the QR-code modal simply falls back to the loopback
- * URL and shows a clear "no Wi-Fi detected" note.
- */
-function parseDesktopLanUrls(raw: string | undefined): Array<{ url: string; address: string; interface: string }> {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .filter((entry) => entry && typeof entry.url === 'string' && typeof entry.address === 'string')
-      .map((entry) => ({
-        url: String(entry.url),
-        address: String(entry.address),
-        interface: typeof entry.interface === 'string' ? entry.interface : '',
-      }));
-  } catch {
-    return [];
-  }
-}
-
 function jsonError(res: Response, status: number, message: string) {
   return res.status(status).json({ error: message });
 }
@@ -235,28 +263,24 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-/**
- * Admin guard for distributed builds: when `LICENSE_REQUIRED=true`, the admin
- * console and admin APIs are blocked until a valid license file is present.
- * Customer APIs (placing orders, viewing the menu) are NEVER blocked — a café
- * never goes dark because of a license issue.
- *
- * Returns a 402 with a structured payload so the UI can show the right
- * "activate / renew" screen instead of a generic error.
- */
-async function requireValidLicense(req: Request, res: Response, next: NextFunction) {
+// In distributed builds (LICENSE_REQUIRED=true), every admin route
+// must also pass a license check. The license payload is attached to
+// the request so the audit middleware (and any handler that wants
+// the customer's plan / cafe name) can read it without a second
+// verifyLicense() round-trip.
+async function requireValidLicense(
+  req: Request & { licensePayload?: import('./license.js').LicensePayload },
+  res: Response,
+  next: NextFunction,
+) {
   if (!isLicenseRequired()) return next();
   const status = await verifyLicense();
-  // Make the active license payload (and the fingerprint baked into it)
-  // available to downstream middlewares so the audit log can watermark
-  // every admin action with the machine that performed it.
   if (status.state === 'active') {
-    (req as Request & { licensePayload?: typeof status.payload }).licensePayload = status.payload;
+    req.licensePayload = status.payload;
+    return next();
   }
-  if (status.state === 'active' || status.state === 'not-required') return next();
+  if (status.state === 'not-required') return next();
   if (status.state === 'expired' && status.gracePeriodEndsAt) {
-    // Still inside the 7-day grace window — let the admin keep working but
-    // mark the response so the UI can show a renewal banner.
     res.setHeader('X-License-State', 'expired-grace');
     res.setHeader('X-License-Grace-Ends-At', String(status.gracePeriodEndsAt));
     return next();
@@ -268,15 +292,19 @@ async function requireValidLicense(req: Request, res: Response, next: NextFuncti
   });
 }
 
-// Combined guard used by every admin route. Validates the license BEFORE
-// the admin session check so a banned/expired customer is told to renew
-// instead of being asked to log in. The audit middleware sits at the end
-// of the chain so it can watermark state-changing admin requests with
-// the admin email + machine fingerprint.
-const requireAdmin: Array<typeof requireValidLicense | typeof requireAdminAuth | ReturnType<typeof auditMiddleware>> = [
-  requireValidLicense,
-  requireAdminAuth,
-  auditMiddleware(),
+// Combined guard used by every admin route. License check first so
+// an expired/banned customer is told to renew instead of being asked
+// to log in. Audit middleware runs last so it can watermark every
+// state-changing request with the admin email + machine fingerprint.
+// Combined guard used by every admin route. License check first so
+// an expired/banned customer is told to renew instead of being asked
+// to log in. Audit middleware runs last so it can watermark every
+// state-changing request with the admin email + machine fingerprint.
+type AdminGuard = (req: Request, res: Response, next: NextFunction) => unknown;
+const requireAdmin: AdminGuard[] = [
+  requireValidLicense as AdminGuard,
+  requireAdminAuth as AdminGuard,
+  auditMiddleware() as AdminGuard,
 ];
 
 async function sendWhatsAppNotification(order: Order, settings: CafeSettings): Promise<{ success: boolean; error?: string }> {
@@ -303,6 +331,9 @@ async function sendWhatsAppNotification(order: Order, settings: CafeSettings): P
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${settings.whatsappApiToken}` },
         body: JSON.stringify({ phone: settings.whatsappNumber, message: messageText, orderId: order.id }),
+        // A slow or hanging gateway must never delay an order: the order is
+        // persisted and confirmed to the customer first, this runs alongside.
+        signal: AbortSignal.timeout(8000),
       });
       if (!response.ok) return { success: false, error: `WhatsApp API error: ${response.status} - ${await response.text()}` };
       return { success: true };
@@ -325,19 +356,22 @@ export function createApp() {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-  app.get('/api/health', async (_req, res) => {
+  app.get('/api/health', asyncRoute(async (_req, res) => {
     const diagnostics = store.getDiagnostics();
-    const isDesktop = process.env.DESKTOP_APP === '1';
-    // LAN addresses of the host running the server, when in desktop mode. The
-    // renderer uses these to build QR-code URLs that customer phones on the
-    // same Wi-Fi can actually reach — `window.location.origin` would be the
-    // staff machine's loopback, which a phone has no route to.
-    const lanUrls = isDesktop ? parseDesktopLanUrls(process.env.DESKTOP_LAN_URLS) : [];
-    const port = Number(process.env.PORT || 3000);
-    // License state is reported (without secrets) so the dashboard can show
-    // the right banner without an extra round-trip.
-    const licenseStatus = isLicenseRequired() ? await verifyLicense() : ({ state: 'not-required' } as LicenseStatus);
     res.set('Cache-Control', 'no-store');
+    const licenseRequired = isLicenseRequired();
+    let licenseState: LicenseStatus | null = null;
+    if (licenseRequired) {
+      // Best-effort: never let a license hiccup fail the health
+      // endpoint. The renderer treats `licenseRequired: true` +
+      // missing `license` as "wizard must run" and shows the
+      // setup flow.
+      try {
+        licenseState = await verifyLicense();
+      } catch {
+        licenseState = { state: 'invalid', reason: 'license check failed' };
+      }
+    }
     res.json({
       status: 'ok',
       app: 'NEXORAOSP RESTAURANT API',
@@ -357,14 +391,13 @@ export function createApp() {
         : undefined,
       dataFile: diagnostics.dataFile,
       ephemeral: diagnostics.ephemeral,
-      isDesktop: isDesktop || undefined,
-      localUrl: isDesktop ? `http://127.0.0.1:${port}` : null,
-      lanUrls,
-      // License state — null when licenses aren't enforced.
-      licenseRequired: isLicenseRequired() || undefined,
-      license: isLicenseRequired() ? licenseStatus : undefined,
-      trialDays: isLicenseRequired() ? getTrialDays() : undefined,
-      trialAvailable: isLicenseRequired() && getTrialDays() > 0,
+      // License gate. Only present in distributed builds; the
+      // renderer treats `licenseRequired: false` as "self-hosted,
+      // no gate".
+      licenseRequired,
+      ...(licenseState ? { license: licenseState } : {}),
+      trialDays: licenseRequired ? getTrialDays() : undefined,
+      trialAvailable: licenseRequired && getTrialDays() > 0,
       // Ops helpers: a very low uptime together with "connected" on every check
       // means requests keep landing on fresh cold starts; VERCEL_REGION shows
       // which datacenter served the request.
@@ -372,107 +405,12 @@ export function createApp() {
       region: process.env.VERCEL_REGION || null,
       timestamp: new Date().toISOString(),
     });
-  });
-
-  // ----------------------------------------------------
-  // License / activation
-  //
-  // These routes are public (no auth) so a fresh install can activate
-  // before the customer has an admin account. They are also available
-  // when LICENSE_REQUIRED is false — a self-hosted user can still
-  // voluntarily register a key to get a "subscription" card in the
-  // dashboard, but the app keeps working without it.
-  // ----------------------------------------------------
-  app.get('/api/license/status', async (_req, res) => {
-    try {
-      const status = isLicenseRequired() ? await verifyLicense() : ({ state: 'not-required' } as LicenseStatus);
-      res.json({
-        licenseRequired: isLicenseRequired(),
-        status,
-        // Trial info for the Setup Wizard. Only meaningful when licenses
-        // are required; included always so the renderer doesn't need to
-        // branch on licenseRequired.
-        trialDays: getTrialDays(),
-        trialAvailable: isLicenseRequired() && getTrialDays() > 0,
-      });
-    } catch (error) {
-      jsonError(res, 500, 'Unable to read license state.');
-    }
-  });
-
-  app.post('/api/license/activate', async (req, res) => {
-    try {
-      const { licenseKey, email, cafeName, fingerprint } = req.body || {};
-      if (!licenseKey || !email || !cafeName || !fingerprint) {
-        return jsonError(res, 400, 'licenseKey, email, cafeName and fingerprint are all required.');
-      }
-      const result = await activateLicense({ licenseKey, email, cafeName, fingerprint });
-      res.json(result);
-    } catch (error: any) {
-      jsonError(res, 500, error?.message || 'Activation failed.');
-    }
-  });
-
-  app.post('/api/license/rebind', async (req, res) => {
-    try {
-      const { licenseKey, email, newFingerprint } = req.body || {};
-      if (!licenseKey || !email || !newFingerprint) {
-        return jsonError(res, 400, 'licenseKey, email and newFingerprint are all required.');
-      }
-      const result = await rebindLicense({ licenseKey, email, newFingerprint });
-      res.json(result);
-    } catch (error: any) {
-      jsonError(res, 500, error?.message || 'Rebind failed.');
-    }
-  });
-
-  app.post('/api/license/heartbeat', async (_req, res) => {
-    try {
-      const result = await heartbeat();
-      res.json(result);
-    } catch (error: any) {
-      jsonError(res, 500, error?.message || 'Heartbeat failed.');
-    }
-  });
-
-  // Explicitly start the trial. Idempotent: if a license (real or trial)
-  // already exists, the response reports the current state without
-  // creating a new trial. The renderer calls this when the user clicks
-  // the “Start free trial” button on the Setup Wizard.
-  app.post('/api/license/start-trial', async (_req, res) => {
-    try {
-      if (!isLicenseRequired()) {
-        return jsonError(res, 400, 'License is not required on this build — the trial is only for distributed builds.');
-      }
-      if (getTrialDays() <= 0) {
-        return jsonError(res, 400, 'No trial is offered on this build.');
-      }
-      const status = await verifyLicense();
-      res.json({ ok: true, trialDays: getTrialDays(), status });
-    } catch (error: any) {
-      jsonError(res, 500, error?.message || 'Could not start trial.');
-    }
-  });
-
-  // Remove the local license file. Available in dev / self-hosted builds
-  // so the user can reset to "fresh install" without uninstalling. In a
-  // distributed build this is a no-op once the central server marks the
-  // key revoked, but the local file will be deleted and the next status
-  // check will return "missing".
-  app.post('/api/license/deactivate', async (_req, res) => {
-    try {
-      await deleteLicenseFile();
-      const status = isLicenseRequired() ? await verifyLicense() : ({ state: 'not-required' } as LicenseStatus);
-      res.json({ ok: true, status });
-    } catch (error: any) {
-      jsonError(res, 500, error?.message || 'Deactivation failed.');
-    }
-  });
+  }));
 
   // ----------------------------------------------------
   // Public customer APIs
   // ----------------------------------------------------
-  app.get('/api/public/tables', async (_req, res) => {
+  app.get('/api/public/tables', asyncRoute(async (_req, res) => {
     try {
       const tables = (await store.list('tables'))
         .filter((table) => table.isActive)
@@ -483,9 +421,9 @@ export function createApp() {
       console.error('Public tables error:', error);
       jsonError(res, 500, 'Unable to load tables from the café database.');
     }
-  });
+  }));
 
-  app.get('/api/table/:token', async (req, res) => {
+  app.get('/api/table/:token', asyncRoute(async (req, res) => {
     try {
       const snapshot = await store.snapshot();
       const table = findTable(snapshot.tables, decodeURIComponent(req.params.token || ''));
@@ -496,15 +434,20 @@ export function createApp() {
         table: { id: table.id, tableNumber: table.tableNumber, name: table.name, token: table.token, isActive: table.isActive, createdAt: table.createdAt },
         settings: publicSettings(snapshot.settings),
         categories: snapshot.categories.sort((a, b) => a.displayOrder - b.displayOrder),
-        products: snapshot.products.filter((product) => product.isAvailable).sort((a, b) => a.displayOrder - b.displayOrder),
+        // Photos are served as cacheable /api/images/... URLs so a phone loads
+        // each photo once instead of re-downloading base64 on every menu open.
+        products: snapshot.products
+          .filter((product) => product.isAvailable)
+          .sort((a, b) => a.displayOrder - b.displayOrder)
+          .map((product) => ({ ...product, image: productImageUrl(product) })),
       });
     } catch (error) {
       console.error('Table menu error:', error);
       jsonError(res, 500, 'Unable to load the menu from the café database.');
     }
-  });
+  }));
 
-  app.get('/api/table/:token/orders', async (req, res) => {
+  app.get('/api/table/:token/orders', asyncRoute(async (req, res) => {
     try {
       const snapshot = await store.snapshot();
       const table = findTable(snapshot.tables, decodeURIComponent(req.params.token || ''));
@@ -517,9 +460,9 @@ export function createApp() {
       console.error('Table orders error:', error);
       jsonError(res, 500, 'Unable to load order history from the café database.');
     }
-  });
+  }));
 
-  app.post('/api/orders', async (req, res) => {
+  app.post('/api/orders', asyncRoute(async (req, res) => {
     try {
       const ip = req.ip || req.socket.remoteAddress || 'unknown';
       const { tableToken, tableId, tableNumber, tableName, customerName, customerPhone, specialInstructions, items, clientRequestId } = req.body || {};
@@ -594,19 +537,30 @@ export function createApp() {
         whatsappNotificationSent: false,
       };
 
-      const whatsappResult = await sendWhatsAppNotification(order, snapshot.settings);
-      order.whatsappNotificationSent = whatsappResult.success;
-      if (whatsappResult.error) order.whatsappNotificationError = whatsappResult.error;
+      // Persist FIRST and confirm to the customer immediately. The WhatsApp
+      // notification used to run (and could hang on a slow gateway) BEFORE the
+      // order was saved — delaying both the kitchen feed and the customer's
+      // confirmation. It now runs alongside, with a hard 8s timeout.
       await store.put('orders', order);
       if (idempotencyKey) rememberRecentOrderRequest(idempotencyKey, order);
+
+      void sendWhatsAppNotification(order, snapshot.settings)
+        .then((result) => {
+          order.whatsappNotificationSent = result.success;
+          order.whatsappNotificationError = result.error;
+          // Best-effort bookkeeping update; the order itself is already saved.
+          return store.put('orders', order).catch(() => undefined);
+        })
+        .catch(() => undefined);
+
       res.status(201).json({ success: true, order, message: 'Order placed successfully!' });
     } catch (error: any) {
       console.error('Order creation error:', error);
       jsonError(res, 500, error?.message || 'Internal server error while placing order.');
     }
-  });
+  }));
 
-  app.get('/api/orders/track/:orderId', async (req, res) => {
+  app.get('/api/orders/track/:orderId', asyncRoute(async (req, res) => {
     try {
       const orders = await store.list('orders');
       const order = orders.find((candidate) => candidate.id === req.params.orderId || candidate.orderNumber === req.params.orderId);
@@ -616,9 +570,38 @@ export function createApp() {
       console.error('Track order error:', error);
       jsonError(res, 500, 'Unable to track the order from the café database.');
     }
-  });
+  }));
 
-  app.post('/api/waiter-call', async (req, res) => {
+  // Read-only lookup of the orders placed from one phone. The customer's
+  // browser remembers the IDs of the orders it submitted (localStorage) and
+  // sends them here. IDs are unguessable (ord- + 8 random bytes) and the
+  // existing track-by-ID endpoint above already exposes a single order by ID,
+  // so this adds no new exposure — it just batches that lookup so the "My
+  // Orders" screen on the customer's phone can show every order they placed,
+  // across tables and past visits, with the date it was placed.
+  app.post('/api/orders/lookup', asyncRoute(async (req, res) => {
+    try {
+      const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : [];
+      const wanted = new Set(
+        rawIds
+          .map((id: unknown) => getIdentifier(id).slice(0, 64))
+          .filter((id: string) => id.length > 0)
+      );
+      // Bounded so a huge or malicious body can never make this scan heavy.
+      if (wanted.size === 0) return res.json({ orders: [] });
+      const limit = Array.from(wanted).slice(0, 200);
+      const limitSet = new Set(limit);
+      const orders = (await store.list('orders'))
+        .filter((order) => limitSet.has(order.id))
+        .sort((a, b) => new Date(b.timeline.createdAt).getTime() - new Date(a.timeline.createdAt).getTime());
+      res.json({ orders });
+    } catch (error) {
+      console.error('Order lookup error:', error);
+      jsonError(res, 500, 'Unable to load your orders from the café database.');
+    }
+  }));
+
+  app.post('/api/waiter-call', asyncRoute(async (req, res) => {
     try {
       const { tableToken, tableId, tableNumber, tableName, customerName } = req.body || {};
       const tables = await store.list('tables');
@@ -640,9 +623,9 @@ export function createApp() {
       console.error('Waiter call error:', error);
       jsonError(res, 500, 'Failed to notify waiter.');
     }
-  });
+  }));
 
-  app.post('/api/feedback', async (req, res) => {
+  app.post('/api/feedback', asyncRoute(async (req, res) => {
     try {
       const { orderId, orderNumber, tableNumber, tableName, customerName, rating, comment } = req.body || {};
       if (!rating || Number(rating) < 1 || Number(rating) > 5) return jsonError(res, 400, 'Rating must be between 1 and 5 stars.');
@@ -663,13 +646,13 @@ export function createApp() {
       console.error('Feedback submit error:', error);
       jsonError(res, 500, 'Failed to submit feedback.');
     }
-  });
+  }));
 
   // ----------------------------------------------------
   // Single admin login + protected admin APIs
   // ----------------------------------------------------
   // The one and only login: the single admin password. No cloud auth service.
-  app.post('/api/admin/login', (req, res) => {
+  app.post('/api/admin/login', asyncRoute((req, res) => {
     const configurationError = getAdminAuthConfigurationError();
     if (configurationError) return jsonError(res, 503, configurationError);
 
@@ -694,11 +677,11 @@ export function createApp() {
       expiresAt: new Date(Date.now() + ADMIN_SESSION_TTL_MS).toISOString(),
       admin: { email: adminEmail },
     });
-  });
+  }));
 
-  app.get('/api/admin/me', requireAdmin, async (req: Request & { adminUser?: { email?: string } }, res) => {
+  app.get('/api/admin/me', requireAdmin, asyncRoute(async (req: Request & { adminUser?: { email?: string } }, res) => {
     res.json({ email: req.adminUser?.email || adminEmail, cafeName: (await store.getSettings()).cafeName });
-  });
+  }));
 
   // Sessions are stateless (signed tokens), so logging out is a client-side
   // token removal; the token itself simply expires after its 7-day lifetime.
@@ -706,7 +689,7 @@ export function createApp() {
     res.json({ success: true });
   });
 
-  app.get('/api/admin/orders', requireAdmin, async (req, res) => {
+  app.get('/api/admin/orders', requireAdmin, asyncRoute(async (req, res) => {
     try {
       // `scope=all-tables` is the read-only feed used by the admin dashboard's
       // live order alerts. It deliberately ignores status/table filters so Table 1,
@@ -725,9 +708,9 @@ export function createApp() {
       console.error('Admin orders error:', error);
       jsonError(res, 500, 'Failed to fetch orders from the café database.');
     }
-  });
+  }));
 
-  app.patch('/api/admin/orders/:id/status', requireAdmin, async (req, res) => {
+  app.patch('/api/admin/orders/:id/status', requireAdmin, asyncRoute(async (req, res) => {
     try {
       const order = await store.get('orders', req.params.id);
       if (!order) return jsonError(res, 404, 'Order not found.');
@@ -747,9 +730,9 @@ export function createApp() {
       console.error('Order status error:', error);
       jsonError(res, 500, 'Failed to update order status.');
     }
-  });
+  }));
 
-  app.patch('/api/admin/orders/:id/payment', requireAdmin, async (req, res) => {
+  app.patch('/api/admin/orders/:id/payment', requireAdmin, asyncRoute(async (req, res) => {
     try {
       const order = await store.get('orders', req.params.id);
       if (!order) return jsonError(res, 404, 'Order not found.');
@@ -762,13 +745,33 @@ export function createApp() {
       console.error('Payment status error:', error);
       jsonError(res, 500, 'Failed to update payment status.');
     }
-  });
+  }));
 
-  app.get('/api/admin/products', requireAdmin, async (_req, res) => {
-    res.json({ products: (await store.list('products')).sort((a, b) => a.displayOrder - b.displayOrder) });
-  });
+  // Product photos, served as cacheable bytes. Photos are stored inside each
+  // product record as data: URLs; without this endpoint every menu load and
+  // every dashboard poll re-downloaded the full base64 of every photo
+  // (megabytes on a photographed menu — a major source of lag). Browsers now
+  // fetch each photo once and cache it immutably; the ?v= hash changes
+  // whenever a photo is replaced.
+  app.get('/api/images/:productId', asyncRoute(async (req, res) => {
+    const product = await store.get('products', String(req.params.productId || ''));
+    const image = typeof product?.image === 'string' ? product.image : '';
+    const match = image.match(/^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/);
+    if (!match) return jsonError(res, 404, 'Image not found.');
+    const bytes = Buffer.from(match[2], 'base64');
+    if (bytes.length === 0) return jsonError(res, 404, 'Image not found.');
+    res.set('Content-Type', match[1]);
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.set('ETag', `"${crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 24)}"`);
+    res.send(bytes);
+  }));
 
-  app.post('/api/admin/products', requireAdmin, async (req, res) => {
+  app.get('/api/admin/products', requireAdmin, asyncRoute(async (_req, res) => {
+    const products = (await store.list('products')).sort((a, b) => a.displayOrder - b.displayOrder);
+    res.json({ products: products.map((product) => ({ ...product, image: productImageUrl(product) })) });
+  }));
+
+  app.post('/api/admin/products', requireAdmin, asyncRoute(async (req, res) => {
     try {
       const body = req.body || {};
       const timestamp = new Date().toISOString();
@@ -790,19 +793,22 @@ export function createApp() {
         updatedAt: timestamp,
       };
       await store.put('products', product);
-      res.status(201).json({ success: true, product });
+      res.status(201).json({ success: true, product: { ...product, image: productImageUrl(product) } });
     } catch (error: any) {
       console.error('Create product error:', error);
       jsonError(res, 500, error?.message || 'Failed to add product.');
     }
-  });
+  }));
 
-  app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
+  app.put('/api/admin/products/:id', requireAdmin, asyncRoute(async (req, res) => {
     try {
       const existing = await store.get('products', req.params.id);
       if (!existing) return jsonError(res, 404, 'Product not found.');
       const body = req.body || {};
       let image = body.image !== undefined ? body.image : existing.image;
+      // The UI sends back the cacheable /api/images/... URL when the photo was
+      // NOT changed — keep the stored data URL instead of saving the proxy.
+      if (typeof image === 'string' && image.startsWith(IMAGE_URL_PREFIX)) image = existing.image;
       if (typeof image === 'string' && image.startsWith('data:image/')) image = await store.uploadImage(image, existing.id);
       const product: Product = {
         ...existing,
@@ -814,38 +820,38 @@ export function createApp() {
         variants: Array.isArray(body.variants) ? body.variants : existing.variants,
       };
       await store.put('products', product);
-      res.json({ success: true, product });
+      res.json({ success: true, product: { ...product, image: productImageUrl(product) } });
     } catch (error: any) {
       console.error('Edit product error:', error);
       jsonError(res, 500, error?.message || 'Failed to update product.');
     }
-  });
+  }));
 
-  app.patch('/api/admin/products/:id/availability', requireAdmin, async (req, res) => {
+  app.patch('/api/admin/products/:id/availability', requireAdmin, asyncRoute(async (req, res) => {
     const product = await store.get('products', req.params.id);
     if (!product) return jsonError(res, 404, 'Product not found.');
     const updated = { ...product, isAvailable: !product.isAvailable, updatedAt: new Date().toISOString() };
     await store.put('products', updated);
-    res.json({ success: true, product: updated });
-  });
+    res.json({ success: true, product: { ...updated, image: productImageUrl(updated) } });
+  }));
 
-  app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
+  app.delete('/api/admin/products/:id', requireAdmin, asyncRoute(async (req, res) => {
     const product = await store.get('products', req.params.id);
     if (!product) return jsonError(res, 404, 'Product not found.');
     await store.remove('products', req.params.id);
     res.json({ success: true });
-  });
+  }));
 
-  app.get('/api/admin/tables', requireAdmin, async (_req, res) => {
+  app.get('/api/admin/tables', requireAdmin, asyncRoute(async (_req, res) => {
     const snapshot = await store.snapshot();
     const tables = snapshot.tables.map((table) => ({
       ...table,
       activeOrder: snapshot.orders.find((order) => order.tableId === table.id && ['new', 'accepted', 'ready'].includes(order.status)) || null,
     }));
     res.json({ tables });
-  });
+  }));
 
-  app.post('/api/admin/tables', requireAdmin, async (req, res) => {
+  app.post('/api/admin/tables', requireAdmin, asyncRoute(async (req, res) => {
     const tableNumber = Number(req.body?.tableNumber);
     if (!Number.isFinite(tableNumber) || tableNumber <= 0) return jsonError(res, 400, 'Valid table number is required.');
     const tables = await store.list('tables');
@@ -860,45 +866,45 @@ export function createApp() {
     };
     await store.put('tables', table);
     res.status(201).json({ success: true, table });
-  });
+  }));
 
-  app.patch('/api/admin/tables/:id/toggle', requireAdmin, async (req, res) => {
+  app.patch('/api/admin/tables/:id/toggle', requireAdmin, asyncRoute(async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     const updated = { ...table, isActive: !table.isActive };
     await store.put('tables', updated);
     res.json({ success: true, table: updated });
-  });
+  }));
 
-  app.patch('/api/admin/tables/:id/regenerate-token', requireAdmin, async (req, res) => {
+  app.patch('/api/admin/tables/:id/regenerate-token', requireAdmin, asyncRoute(async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     const updated = { ...table, token: `nexoraosp_tbl_tok_table${table.tableNumber}_${crypto.randomBytes(6).toString('hex')}` };
     await store.put('tables', updated);
     res.json({ success: true, table: updated });
-  });
+  }));
 
-  app.delete('/api/admin/tables/:id', requireAdmin, async (req, res) => {
+  app.delete('/api/admin/tables/:id', requireAdmin, asyncRoute(async (req, res) => {
     const table = await store.get('tables', req.params.id);
     if (!table) return jsonError(res, 404, 'Table not found.');
     await store.remove('tables', req.params.id);
     res.json({ success: true });
-  });
+  }));
 
-  app.get('/api/admin/categories', requireAdmin, async (_req, res) => {
+  app.get('/api/admin/categories', requireAdmin, asyncRoute(async (_req, res) => {
     res.json({ categories: (await store.list('categories')).sort((a, b) => a.displayOrder - b.displayOrder) });
-  });
+  }));
 
-  app.post('/api/admin/categories', requireAdmin, async (req, res) => {
+  app.post('/api/admin/categories', requireAdmin, asyncRoute(async (req, res) => {
     const name = getIdentifier(req.body?.name);
     if (!name) return jsonError(res, 400, 'Category name is required.');
     const categories = await store.list('categories');
     const category: CafeCategory = { id: newId('cat'), name, displayOrder: categories.length + 1 };
     await store.put('categories', category);
     res.status(201).json({ success: true, category });
-  });
+  }));
 
-  app.put('/api/admin/categories/:id', requireAdmin, async (req, res) => {
+  app.put('/api/admin/categories/:id', requireAdmin, asyncRoute(async (req, res) => {
     const name = getIdentifier(req.body?.name);
     if (!name) return jsonError(res, 400, 'Valid category name is required.');
     const category = await store.get('categories', req.params.id);
@@ -909,46 +915,66 @@ export function createApp() {
     await store.put('categories', updatedCategory);
     await Promise.all(products.filter((product) => product.category.toLowerCase() === oldName.toLowerCase()).map((product) => store.put('products', { ...product, category: name, updatedAt: new Date().toISOString() })));
     res.json({ success: true, category: updatedCategory, updatedProductsCount: products.filter((product) => product.category.toLowerCase() === oldName.toLowerCase()).length });
-  });
+  }));
 
-  app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
+  app.delete('/api/admin/categories/:id', requireAdmin, asyncRoute(async (req, res) => {
     const category = await store.get('categories', req.params.id);
     if (!category) return jsonError(res, 404, 'Category not found.');
     await store.remove('categories', req.params.id);
     res.json({ success: true });
-  });
+  }));
 
-  app.get('/api/admin/waiter-calls', requireAdmin, async (_req, res) => {
+  app.get('/api/admin/waiter-calls', requireAdmin, asyncRoute(async (_req, res) => {
     const calls = (await store.list('waiterCalls')).sort((a, b) => new Date(b.calledAt || b.createdAt || 0).getTime() - new Date(a.calledAt || a.createdAt || 0).getTime());
     res.json({ calls });
-  });
+  }));
 
-  app.patch('/api/admin/waiter-calls/:id/attend', requireAdmin, async (req, res) => {
+  app.patch('/api/admin/waiter-calls/:id/attend', requireAdmin, asyncRoute(async (req, res) => {
     const call = await store.get('waiterCalls', req.params.id);
     if (!call) return jsonError(res, 404, 'Waiter call not found.');
     const updated = { ...call, status: 'attended' as const, attendedAt: new Date().toISOString() };
     await store.put('waiterCalls', updated);
     res.json({ success: true, call: updated });
-  });
+  }));
 
-  app.get('/api/admin/feedbacks', requireAdmin, async (_req, res) => {
+  app.get('/api/admin/feedbacks', requireAdmin, asyncRoute(async (_req, res) => {
     const feedbacks = (await store.list('feedbacks')).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     const averageRating = feedbacks.length ? Number((feedbacks.reduce((sum, item) => sum + item.rating, 0) / feedbacks.length).toFixed(1)) : 0;
     const ratingDistribution: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
     feedbacks.forEach((item) => { const rating = Math.max(1, Math.min(5, Math.round(item.rating))); ratingDistribution[rating] += 1; });
     res.json({ feedbacks, averageRating, totalFeedbacks: feedbacks.length, ratingDistribution });
-  });
+  }));
 
-  app.get('/api/admin/reports', requireAdmin, async (req, res) => {
+  app.get('/api/admin/reports', requireAdmin, asyncRoute(async (req, res) => {
     const { range = 'today', startDate, endDate } = req.query;
+    // The dashboard sends its timezone offset so day ranges follow the
+    // operator's local clock: "Today" starts at THEIR 12:00 AM, not the
+    // server's (a UTC serverless region would otherwise roll the day at
+    // 5:30 AM IST). Without the offset, the server's own local time is used.
+    const tzOffsetMinutes = parseTimezoneOffsetMinutes(req.query.tzOffsetMinutes);
+
     const nowDate = new Date();
+    const startOfLocalDay = (base: Date) =>
+      tzOffsetMinutes !== null
+        ? startOfDayInZone(base, tzOffsetMinutes)
+        : new Date(base.getFullYear(), base.getMonth(), base.getDate());
+
     let filterStart = new Date(0);
     let filterEnd = new Date();
-    if (range === 'today') filterStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
-    else if (range === 'yesterday') { filterStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - 1); filterEnd = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - 1, 23, 59, 59, 999); }
-    else if (range === 'week') filterStart = new Date(nowDate.getTime() - 7 * 24 * 60 * 60 * 1000);
-    else if (range === 'month') filterStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
-    else if (range === 'custom' && startDate && endDate) { filterStart = new Date(String(startDate)); filterEnd = new Date(String(endDate)); }
+    if (range === 'today') {
+      filterStart = startOfLocalDay(nowDate);
+    } else if (range === 'yesterday') {
+      const todayStart = startOfLocalDay(nowDate);
+      filterStart = startOfLocalDay(new Date(todayStart.getTime() - 1));
+      filterEnd = new Date(todayStart.getTime() - 1);
+    } else if (range === 'week') {
+      filterStart = new Date(nowDate.getTime() - 7 * 24 * 60 * 60 * 1000);
+    } else if (range === 'month') {
+      filterStart =
+        tzOffsetMinutes !== null
+          ? startOfMonthInZone(nowDate, tzOffsetMinutes)
+          : new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
+    } else if (range === 'custom' && startDate && endDate) { filterStart = new Date(String(startDate)); filterEnd = new Date(String(endDate)); }
 
     const orders = (await store.list('orders')).filter((order) => { const date = new Date(order.timeline.createdAt); return date >= filterStart && date <= filterEnd; });
     const completedOrders = orders.filter((order) => order.status === 'completed');
@@ -972,24 +998,24 @@ export function createApp() {
       recentOrders: orders.sort((a, b) => new Date(b.timeline.createdAt).getTime() - new Date(a.timeline.createdAt).getTime()).slice(0, 10),
     };
     res.json({ summary });
-  });
+  }));
 
-  app.get('/api/admin/settings', requireAdmin, async (req: Request & { adminUser?: { email?: string } }, res) => {
+  app.get('/api/admin/settings', requireAdmin, asyncRoute(async (req: Request & { adminUser?: { email?: string } }, res) => {
     res.json({ settings: await store.getSettings(), adminEmail: req.adminUser?.email || adminEmail });
-  });
+  }));
 
-  app.put('/api/admin/settings', requireAdmin, async (req, res) => {
+  app.put('/api/admin/settings', requireAdmin, asyncRoute(async (req, res) => {
     const updates = req.body;
     if (!updates || typeof updates !== 'object') return jsonError(res, 400, 'Invalid settings payload.');
     const settings = { ...(await store.getSettings()), ...updates };
     await store.putSettings(settings);
     res.json({ success: true, settings });
-  });
+  }));
 
   // Change the single admin password. It is saved to the active credential
   // store (data/admin.json locally, database on Vercel) and takes effect
   // immediately — no restart and no cloud auth service needed.
-  app.post('/api/admin/change-password', requireAdmin, async (req, res) => {
+  app.post('/api/admin/change-password', requireAdmin, asyncRoute(async (req, res) => {
     try {
       const currentPassword = getIdentifier(req.body?.currentPassword);
       const newPassword = getIdentifier(req.body?.newPassword);
@@ -1000,38 +1026,152 @@ export function createApp() {
       console.error('Change password error:', error);
       jsonError(res, 500, error?.message || 'Failed to update the admin password.');
     }
-  });
+  }));
 
-  // Returns the most recent audit log entries. Newest first. The
-  // fingerprint watermark makes it possible to trace any leaked
-  // license back to the original machine.
-  app.get('/api/admin/audit', requireAdmin, async (req, res) => {
-    try {
-      const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
-      const file = path.join(
-        process.env.DATA_DIR || (process.env.VERCEL ? '/tmp/restaurant-data' : path.join(process.cwd(), 'data')),
-        'audit.log',
-      );
-      let raw = '';
-      try {
-        raw = await fs.promises.readFile(file, 'utf8');
-      } catch {
-        // No audit log yet — return empty.
-        return res.json({ entries: [] });
-      }
-      // File is one JSON object per line; newest entries are at the end.
-      const lines = raw.split(String.fromCharCode(10)).filter((l) => l.trim());
-      const entries = lines
-        .slice(-limit)
-        .reverse()
-        .map((line) => {
-          try { return JSON.parse(line); } catch { return null; }
-        })
-        .filter(Boolean);
-      res.json({ entries });
-    } catch (error: any) {
-      jsonError(res, 500, error?.message || 'Could not read audit log.');
+  // ── License / activation ──────────────────────────────────────────────────
+  // Only mounted when LICENSE_REQUIRED=true. In self-hosted / dev builds
+  // (LICENSE_REQUIRED unset), every route below short-circuits to a
+  // "not-required" response so the renderer can pretend the wizard
+  // already finished.
+
+  app.get('/api/license/status', asyncRoute(async (_req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ licenseRequired: false, status: { state: 'not-required' as const }, trialDays: 0, trialAvailable: false });
     }
+    const status = await verifyLicense();
+    res.json({
+      licenseRequired: true,
+      status,
+      trialDays: getTrialDays(),
+      trialAvailable: getTrialDays() > 0,
+    });
+  }));
+
+  app.post('/api/license/start-trial', asyncRoute(async (_req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: false, error: 'This build does not require a license.' });
+    }
+    if (getTrialDays() <= 0) {
+      return res.json({ ok: false, error: 'Trials are disabled on this build.' });
+    }
+    // Idempotent: verifyLicense() auto-mints a trial if no license
+    // file exists yet, and returns the existing license otherwise.
+    const status = await verifyLicense();
+    res.json({ ok: true, trialDays: getTrialDays(), status });
+  }));
+
+  app.post('/api/license/activate', asyncRoute(async (req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: false, error: 'This build does not require a license.' });
+    }
+    const { licenseKey, email, cafeName } = req.body || {};
+    const fingerprint = (req.body && req.body.fingerprint) || 'unknown';
+    const result = await activateLicense({ licenseKey, email, cafeName, fingerprint });
+    if (!result.ok) {
+      // Map the error code to an appropriate HTTP status. The renderer
+      // mostly cares about result.errorCode; the status is for browsers
+      // and proxies.
+      const status = result.errorCode === 'KEY_BOUND_TO_OTHER_MACHINE' || result.errorCode === 'KEY_REVOKED'
+        ? 403
+        : result.errorCode === 'INVALID_KEY'
+          ? 404
+          : 400;
+      return res.status(status).json(result);
+    }
+    res.json(result);
+  }));
+
+  app.post('/api/license/heartbeat', asyncRoute(async (_req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: true, status: 'not-required' });
+    }
+    const result = await heartbeat();
+    res.json(result);
+  }));
+
+  app.post('/api/license/rebind', asyncRoute(async (req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: false, error: 'This build does not require a license.' });
+    }
+    const { licenseKey, email } = req.body || {};
+    const newFingerprint = (req.body && req.body.newFingerprint) || 'unknown';
+    const result = await rebindLicense({ licenseKey, email, newFingerprint });
+    if (!result.ok) {
+      const status = result.errorCode === 'KEY_BOUND_TO_OTHER_MACHINE' || result.errorCode === 'KEY_REVOKED'
+        ? 403
+        : result.errorCode === 'INVALID_KEY'
+          ? 404
+          : 400;
+      return res.status(status).json(result);
+    }
+    res.json(result);
+  }));
+
+  // Delete the locally stored license. Used by the wizard's "Start
+  // over" link and by support when helping a customer re-activate.
+  // Refuses to do anything if the build is not license-gated, so
+  // self-hosted users can't accidentally wipe their data file.
+  app.post('/api/license/delete', asyncRoute(async (_req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: false, error: 'This build does not require a license.' });
+    }
+    const ok = await deleteLicenseFile();
+    res.json({ ok });
+  }));
+
+  // Per-machine audit log. Newest entries first. Used by the
+  // AdminSettings → "View audit log" toggle to investigate who
+  // changed what (and from which machine, so a leaked license can
+  // be traced back to the original buyer).
+  app.get('/api/admin/audit', requireAdmin, asyncRoute(async (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+    const auditFile = path.join(
+      process.env.DATA_DIR || (process.env.VERCEL ? '/tmp/restaurant-data' : path.join(process.cwd(), 'data')),
+      'audit.log',
+    );
+    let raw = '';
+    try {
+      raw = await fs.promises.readFile(auditFile, 'utf8');
+    } catch {
+      return res.json({ entries: [] });
+    }
+    const lines = raw.split(String.fromCharCode(10)).filter((l) => l.trim());
+    const entries = lines
+      .slice(-limit)
+      .reverse()
+      .map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      })
+      .filter(Boolean);
+    res.json({ entries });
+  }));
+
+  // ── Global JSON error responder ────────────────────────────────────────────
+  // Final safety net for every route (see asyncRoute): a storage hiccup or an
+  // unexpected throw becomes ONE logged line and a clean JSON error for the
+  // client — never an unhandled rejection that kills the backend process, and
+  // never an HTML error page the app cannot parse.
+  app.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
+    const err = error as { status?: number; statusCode?: number; expose?: boolean; type?: string; message?: string; stack?: string };
+    // Body-parser failures (malformed JSON, oversized body): expose the
+    // parser's own 4xx status instead of a generic 500.
+    const status = typeof err?.status === 'number' ? err.status : typeof err?.statusCode === 'number' ? err.statusCode : undefined;
+    if (status !== undefined && status >= 400 && status < 500 && err?.expose) {
+      const message =
+        err?.type === 'entity.parse.failed'
+          ? 'Request body is not valid JSON.'
+          : err?.type === 'entity.too.large'
+            ? 'Request body is too large.'
+            : err?.message || 'Bad request.';
+      return jsonError(res, status, message);
+    }
+    if (res.headersSent) {
+      // Express already streamed a response — its default handler closes the
+      // connection cleanly; nothing more we can send.
+      return next(error);
+    }
+    console.error(`[api] Unhandled error on ${req.method} ${req.originalUrl}:`, err?.stack || error);
+    jsonError(res, 500, 'The server hit an unexpected error handling this request. It has been logged and the app keeps running — please retry.');
   });
 
   return app;
