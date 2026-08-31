@@ -1,0 +1,26 @@
+{
+  "name": "nexoraosp-restaurant-license-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Central license server for the NEXORAOSP RESTAURANT desktop app. Mints signed JWTs, tracks per-key fingerprints, and exposes an admin page to issue and revoke keys.",
+  "main": "index.ts",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "migrate": "node scripts/migrate.js"
+  },
+  "dependencies": {
+    "@vercel/postgres": "^0.10.0",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "@vercel/node": "^10.0.0",
+    "typescript": "^5.7.2",
+    "vercel": "^39.0.0"
+  }
+}

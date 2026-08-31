@@ -122,7 +122,27 @@ The server should:
 
 ## Reference implementation
 
-A minimal Node/Express server is ~200 lines. The two tables you need:
+A complete reference implementation lives in [`license-server/`](license-server/) —
+a Vercel-deployable Node.js + Postgres app that exposes all three
+endpoints plus a single-page admin UI for issuing and revoking keys.
+
+```bash
+cd license-server
+npm install
+npx vercel link
+npx vercel env add LICENSE_SIGNING_SECRET production
+npx vercel env add LICENSE_ADMIN_PASSWORD production
+npx vercel env add POSTGRES_URL production
+POSTGRES_URL=... node scripts/migrate.js
+npx vercel --prod
+```
+
+See [`license-server/README.md`](license-server/README.md) for the
+full deploy guide and the API summary table.
+
+---
+
+The two tables you need (also defined in `license-server/lib/store.ts`):
 
 ```sql
 CREATE TABLE license_keys (

@@ -1,0 +1,22 @@
+# Build artifacts
+node_modules/
+dist/
+.next/
+
+# Vercel local
+.vercel/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor
+.DS_Store
+.vscode/
+.idea/
