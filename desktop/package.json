@@ -1,0 +1,68 @@
+{
+  "name": "nagori-chai-point-desktop",
+  "productName": "Nagori Chai Point",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nagori Chai Point desktop staff console: the café's order server and admin dashboard in one installable app, with all data stored on this machine.",
+  "main": "main.cjs",
+  "author": {
+    "name": "Nagori Chai Point",
+    "email": "admin@nagoritea.com"
+  },
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux",
+    "dist:mac": "electron-builder --mac"
+  },
+  "devDependencies": {
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.nagorichaipoint.desktop",
+    "productName": "Nagori Chai Point",
+    "artifactName": "nagori-chai-point-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "../release",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "app/**/*"
+    ],
+    "asar": false,
+    "compression": "maximum",
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "zip", "arch": ["x64"] }
+      ],
+      "icon": "build/icon.png",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Nagori Chai Point"
+    },
+    "mac": {
+      "target": [{ "target": "dmg", "arch": ["x64"] }],
+      "category": "public.app-category.business",
+      "icon": "build/icon.png"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Office",
+      "maintainer": "Nagori Chai Point <admin@nagoritea.com>",
+      "synopsis": "Café staff console: live orders, waiter calls and menu management",
+      "icon": "build/icon.png"
+    }
+  }
+}

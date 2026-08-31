@@ -128,8 +128,9 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
 
         <div className="pt-3 text-center border-t border-[#e7e2dc] space-y-2">
           <p className="text-[11px] text-[#a89f91] leading-relaxed">
-            Password is set by <span className="font-bold text-[#6b5d52]">ADMIN_PASSWORD</span> in your <span className="font-bold text-[#6b5d52]">.env</span> file
-            (default: <span className="font-bold text-[#6b5d52]">9852120609@</span>). Change it anytime from Café Settings.
+            Access is protected by the owner password configured on the server
+            (<span className="font-bold text-[#6b5d52]">ADMIN_PASSWORD</span>). It can be changed
+            anytime from Café Settings after logging in.
           </p>
           <button
             type="button"

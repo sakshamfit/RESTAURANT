@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Settings,
   MessageSquare,
@@ -11,9 +11,12 @@ import {
   ExternalLink,
   Shield,
   Volume2,
+  Monitor,
+  FolderOpen,
 } from 'lucide-react';
 import { CafeSettings } from '../types';
 import { api } from '../services/api';
+import type { NagoriDesktopInfo } from '../desktop';
 
 interface AdminSettingsProps {
   settings: CafeSettings;
@@ -39,6 +42,14 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
   const [changingPassword, setChangingPassword] = useState<boolean>(false);
+
+  // Present only inside the packaged desktop app (window.nagoriDesktop is
+  // injected by its preload script; never present in a browser).
+  const [desktopInfo, setDesktopInfo] = useState<NagoriDesktopInfo | null>(null);
+  useEffect(() => {
+    if (!window.nagoriDesktop?.isDesktop) return;
+    window.nagoriDesktop.getInfo().then(setDesktopInfo).catch(() => setDesktopInfo(null));
+  }, []);
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -380,6 +391,44 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
           </button>
         </div>
       </form>
+
+      {/* Desktop console — visible only inside the installed desktop app. */}
+      {desktopInfo && (
+        <div className="bg-white rounded-3xl p-6 border border-stone-200 shadow-xs space-y-4">
+          <div className="flex items-center justify-between border-b border-stone-100 pb-4">
+            <div>
+              <h2 className="font-bold text-lg text-stone-900 flex items-center gap-2">
+                <Monitor className="w-5 h-5 text-amber-700" />
+                <span>Desktop Console</span>
+              </h2>
+              <p className="text-xs text-stone-500">
+                This dashboard is running as an installed desktop app with a local order server.
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs text-stone-600">
+            <div className="bg-stone-50 rounded-xl px-3 py-2 border border-stone-200">
+              <p className="font-bold text-stone-800">App version</p>
+              <p className="font-mono">{desktopInfo.appVersion}</p>
+            </div>
+            <div className="bg-stone-50 rounded-xl px-3 py-2 border border-stone-200">
+              <p className="font-bold text-stone-800">Platform</p>
+              <p className="font-mono">{desktopInfo.platform} ({desktopInfo.arch})</p>
+            </div>
+            <div className="sm:col-span-2 bg-stone-50 rounded-xl px-3 py-2 border border-stone-200">
+              <p className="font-bold text-stone-800">Local data folder</p>
+              <p className="font-mono break-all">{desktopInfo.dataDir}</p>
+            </div>
+          </div>
+          <button
+            onClick={() => void window.nagoriDesktop?.openDataFolder()}
+            className="py-2 px-4 bg-stone-900 hover:bg-stone-800 text-white font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-2"
+          >
+            <FolderOpen className="w-4 h-4" />
+            Open Data Folder
+          </button>
+        </div>
+      )}
     </div>
   );
 };

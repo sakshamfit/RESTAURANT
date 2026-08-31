@@ -11,3 +11,9 @@ data/*.json.tmp
 api/index.cjs
 api/*.map
 api/*.tmp
+
+# Desktop packaging (staged web/server bundle, installer output, toolchain)
+desktop/app/
+desktop/node_modules/
+desktop/dist/
+release/

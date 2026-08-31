@@ -1,51 +1,56 @@
 import type { Order } from '../types';
 
 /**
- * Spoken order/waiter alerts. These use the browser's built-in Web Speech API
- * but the voice is chosen with a quality-first ranking so that, when the device
- * ships a premium neural voice (Microsoft "Aria/Sonia/Jenny Natural", Google
- * natural voices, Apple Siri/Premium voices), the assistant sounds like a real
- * human instead of a robotic default.
+ * Spoken staff alerts.
+ *
+ * The admin dashboard announces new orders and waiter calls using the
+ * browser's built-in speech engine. No audio files are shipped and no network
+ * service is called — the voice is whatever the device already has installed.
+ *
+ * Voice selection is quality-first: when the device ships a natural/neural
+ * voice it is preferred over the platform's basic fallback, so announcements
+ * stay clear on a busy service floor.
  *
  * Robustness details:
  *  - The browser voice list loads ASYNCHRONOUSLY. We wait for the
  *    `voiceschanged` event (with a poll + gesture fallback) before speaking, so
- *    the very first announcement after page load already uses the good voice.
- *  - The queue makes sure two tables ordering together never talk over each
- *    other, with a hard time cap so a stuck utterance can't block the queue.
+ *    the very first announcement after page load already uses the best voice.
+ *  - Announcements are queued, so two tables ordering together never talk over
+ *    each other, with a hard time cap so a stuck utterance cannot block the
+ *    queue.
  *  - A generation counter invalidates any in-flight announcement when the
- *    queue is cleared / stopped, so an awaited voice never speaks after stop.
+ *    queue is cleared, so a pending voice never speaks after "stop".
  */
-export const MAX_ORDER_VOICE_DURATION_MS = 15_000;
+export const MAX_ANNOUNCEMENT_DURATION_MS = 15_000;
 
-export interface VoiceAnnouncementCallbacks {
+export interface SpokenAlertCallbacks {
   onStart?: (message: string) => void;
   onFinish?: () => void;
 }
 
 type OrderAlert = Pick<Order, 'tableName' | 'tableNumber'>;
 
-type QueuedAnnouncement = VoiceAnnouncementCallbacks & {
+type QueuedAnnouncement = SpokenAlertCallbacks & {
   message: string;
 };
 
-// Human-friendly feminine assistant voice names across platforms (Chrome
-// Android, Google voices, Microsoft Edge / Windows, Apple macOS/iOS, Samsung).
-// Web Speech doesn't expose gender, so we match on the name strings.
-const FEMALE_VOICE_NAME_HINTS = [
-  'female', 'woman',
-  // Premium / neural human-sounding voices first
+// Human-sounding voice names across platforms (Chrome Android, Google voices,
+// Microsoft Edge / Windows, Apple macOS/iOS, Samsung). The speech API does not
+// expose gender, so we match on the name strings.
+const PREFERRED_VOICE_NAME_HINTS = [
   'aria', 'sonia', 'jenny', 'neerja', 'swara', 'google natural',
-  'samantha', 'victoria', 'siri', 'karen', 'moira', 'tessa',
+  'samantha', 'victoria', 'karen', 'moira', 'tessa',
   'zira', 'susan', 'hazel', 'veena', 'lekha', 'priya', 'sangeeta',
   'heera', 'raveena', 'natasha', 'libby', 'ava', 'allison', 'serena',
   'emma', 'olivia', 'linda', 'kathy', 'salli', 'joanna', 'ivy',
   'kimberly', 'amy', 'nicky', 'fiona', 'catherine',
 ] as const;
 
-// Names that reliably mean a LOW quality robotic male voice — deprioritise
-// these even if they otherwise look like an English voice.
-const ROBOTIC_VOICE_HINTS = ['david', 'mark', 'fred', 'albert', 'ralph', 'bruce', 'george', 'daniel', 'oliver'] as const;
+// Names that reliably mean a low-quality, harsh voice — deprioritise these
+// even if they otherwise look like an English voice.
+const LOW_QUALITY_VOICE_HINTS = [
+  'david', 'mark', 'fred', 'albert', 'ralph', 'bruce', 'george', 'daniel', 'oliver',
+] as const;
 
 let announcementQueue: QueuedAnnouncement[] = [];
 let activeAnnouncement: {
@@ -62,7 +67,8 @@ let queueGeneration = 0;
 
 let voicesReadyPromise: Promise<SpeechSynthesisVoice[]> | null = null;
 
-function canSpeak(): boolean {
+/** True when this browser can produce spoken announcements at all. */
+export function isSpokenAlertSupported(): boolean {
   return (
     typeof window !== 'undefined' &&
     typeof window.speechSynthesis !== 'undefined' &&
@@ -78,39 +84,34 @@ function isIndianEnglishVoice(voice: SpeechSynthesisVoice): boolean {
   return /^en(?:-|_)in/i.test(voice.lang || '');
 }
 
-function isFemaleNamedVoice(voice: SpeechSynthesisVoice): boolean {
+function isPreferredNamedVoice(voice: SpeechSynthesisVoice): boolean {
   const label = `${voice.name} ${voice.voiceURI}`.toLowerCase();
-  return FEMALE_VOICE_NAME_HINTS.some((hint) => label.includes(hint));
+  return PREFERRED_VOICE_NAME_HINTS.some((hint) => label.includes(hint));
 }
 
-function isRoboticVoice(voice: SpeechSynthesisVoice): boolean {
+function isLowQualityVoice(voice: SpeechSynthesisVoice): boolean {
   const label = `${voice.name} ${voice.voiceURI}`.toLowerCase();
-  return ROBOTIC_VOICE_HINTS.some((hint) => label.includes(hint));
+  return LOW_QUALITY_VOICE_HINTS.some((hint) => label.includes(hint));
 }
 
 /**
- * Higher score = more natural / more desirable.
+ * Higher score = more desirable.
  *
  * Quality signals (biggest wins first):
- *  - premium neural/online/“natural” voices (these genuinely sound human)
+ *  - natural / neural / online voices (these are the clear ones)
  *  - local, non-default voices
- *  - female assistant voice
  * Region: Indian English first (this is an Indian café), then US/UK English.
  */
 function scoreVoice(voice: SpeechSynthesisVoice): number {
   const label = `${voice.name} ${voice.voiceURI}`.toLowerCase();
   let score = 0;
 
-  // Quality tier — the single biggest factor for “sounding real”.
   if (/(natural|neural|online|premium|wavenet|studio|enhanced)/.test(label)) score += 1000;
-  if (voice.localService === false) score += 250; // cloud voices are the high-quality ones
+  if (voice.localService === false) score += 250; // cloud voices are the higher-quality ones
   if (voice.localService === true) score += 40;
-  if (isRoboticVoice(voice)) score -= 600;
+  if (isLowQualityVoice(voice)) score -= 600;
+  if (isPreferredNamedVoice(voice)) score += 150;
 
-  // Prefer a feminine assistant voice.
-  if (isFemaleNamedVoice(voice)) score += 150;
-
-  // Region preference.
   if (isIndianEnglishVoice(voice)) score += 90;
   else if (/^en(?:-|_)(us|gb)/i.test(voice.lang || '')) score += 60;
   else if (isEnglishVoice(voice)) score += 40;
@@ -121,11 +122,11 @@ function scoreVoice(voice: SpeechSynthesisVoice): number {
 }
 
 /**
- * Resolve the best voice once the browser's voice list is actually loaded.
+ * Resolve the voice list once the browser has actually loaded it.
  * Cached after the first resolution so repeated announcements are instant.
  */
 function getVoices(): Promise<SpeechSynthesisVoice[]> {
-  if (!canSpeak()) return Promise.resolve([]);
+  if (!isSpokenAlertSupported()) return Promise.resolve([]);
 
   const direct = window.speechSynthesis.getVoices();
   if (direct.length > 0) return Promise.resolve(direct);
@@ -157,8 +158,8 @@ function getVoices(): Promise<SpeechSynthesisVoice[]> {
     // A user gesture also unlocks/loads the voice list on mobile browsers.
     window.addEventListener('pointerdown', finish, { once: true });
 
-    // Never wait forever: after 2s, speak with whatever (possibly the default)
-    // voice we have instead of staying silent.
+    // Never wait forever: after 2s, speak with whatever voice we have instead
+    // of staying silent.
     window.setTimeout(() => {
       window.clearInterval(poll);
       finish();
@@ -170,7 +171,7 @@ function getVoices(): Promise<SpeechSynthesisVoice[]> {
 
 /** Pick the highest-ranked English voice available on this device. */
 async function getPreferredVoice(): Promise<SpeechSynthesisVoice | undefined> {
-  if (!canSpeak()) return undefined;
+  if (!isSpokenAlertSupported()) return undefined;
   const voices = await getVoices();
   const english = voices.filter(isEnglishVoice);
   const pool = english.length > 0 ? english : voices;
@@ -188,7 +189,7 @@ function finishActiveAnnouncement(item: QueuedAnnouncement) {
   activeAnnouncement = null;
   item.onFinish?.();
 
-  // Let SpeechSynthesis process its previous end event before speaking the
+  // Let the speech engine process its previous end event before speaking the
   // next message. This avoids messages being dropped in Chrome.
   window.setTimeout(() => void startNextAnnouncement(), 0);
 }
@@ -198,18 +199,18 @@ async function startNextAnnouncement() {
 
   const generationAtStart = queueGeneration;
   const item = announcementQueue.shift();
-  if (!item || !canSpeak()) {
+  if (!item || !isSpokenAlertSupported()) {
     item?.onFinish?.();
     return;
   }
 
   const utterance = new window.SpeechSynthesisUtterance(item.message);
 
-  // Wait for the voice list to be populated so the FIRST announcement uses the
-  // natural neural voice rather than the browser's robotic fallback.
+  // Wait for the voice list to be populated so the FIRST announcement already
+  // uses the best available voice instead of the browser's fallback.
   const preferredVoice = await getPreferredVoice();
 
-  // Stop() was called (or everything cleared) while we awaited the voice list.
+  // stop() was called while we awaited the voice list — drop this message.
   if (generationAtStart !== queueGeneration) {
     item.onFinish?.();
     return;
@@ -227,7 +228,7 @@ async function startNextAnnouncement() {
     utterance.lang = 'en-IN';
   }
 
-  // Natural, warm assistant delivery — close to a real person's speaking rate.
+  // Natural delivery, close to a person's speaking rate.
   utterance.rate = 1.0;
   utterance.pitch = 1.05;
   utterance.volume = 1;
@@ -244,7 +245,7 @@ async function startNextAnnouncement() {
   utterance.onend = () => finishActiveAnnouncement(item);
   utterance.onerror = () => finishActiveAnnouncement(item);
 
-  // Update the hotel/admin panel at the same moment the spoken message begins.
+  // Update the dashboard banner at the moment the spoken message begins.
   item.onStart?.(item.message);
 
   active.stopTimer = window.setTimeout(() => {
@@ -255,7 +256,7 @@ async function startNextAnnouncement() {
       // The visual alert still closes even if the speech engine fails.
     }
     finishActiveAnnouncement(item);
-  }, MAX_ORDER_VOICE_DURATION_MS);
+  }, MAX_ANNOUNCEMENT_DURATION_MS);
 
   try {
     window.speechSynthesis.speak(utterance);
@@ -264,8 +265,8 @@ async function startNextAnnouncement() {
   }
 }
 
-function queueAnnouncement(message: string, callbacks: VoiceAnnouncementCallbacks = {}): boolean {
-  if (!canSpeak()) return false;
+function queueAnnouncement(message: string, callbacks: SpokenAlertCallbacks = {}): boolean {
+  if (!isSpokenAlertSupported()) return false;
   announcementQueue.push({ message, ...callbacks });
   void startNextAnnouncement();
   return true;
@@ -278,12 +279,12 @@ function tableLabel(order: OrderAlert | { tableName?: string; tableNumber: numbe
 }
 
 /**
- * Warms the browser voice list after the first user interaction (no audio is
- * played). Call this on dashboard load / first gesture so the voice list is
- * ready before an order ever arrives.
+ * Warms the browser voice list after the first user interaction (nothing is
+ * spoken). Call this on dashboard load so the voice list is ready before the
+ * first order arrives.
  */
-export function prepareOrderVoiceAnnouncements(): boolean {
-  if (!canSpeak()) return false;
+export function prepareSpokenAlerts(): boolean {
+  if (!isSpokenAlertSupported()) return false;
   try {
     window.speechSynthesis.getVoices();
     void getVoices(); // start loading + cache the list
@@ -294,12 +295,12 @@ export function prepareOrderVoiceAnnouncements(): boolean {
 }
 
 /**
- * Announce a newly placed order from any table returned by the all-table admin
- * endpoint. Deliberately concise (a few seconds of speech).
+ * Announce a newly placed order from the all-table admin feed.
+ * Deliberately concise: a few seconds of speech.
  */
-export function announceOrderReceived(order: OrderAlert, callbacks: VoiceAnnouncementCallbacks = {}): boolean {
+export function announceOrderReceived(order: OrderAlert, callbacks: SpokenAlertCallbacks = {}): boolean {
   return queueAnnouncement(
-    `You have received a new order from ${tableLabel(order)}. Please check the order panel.`,
+    `New order from ${tableLabel(order)}. Please check the order panel.`,
     callbacks
   );
 }
@@ -307,24 +308,16 @@ export function announceOrderReceived(order: OrderAlert, callbacks: VoiceAnnounc
 /** Announce that a customer has pressed the "Call Waiter" button. */
 export function announceWaiterCall(
   table: { tableName?: string; tableNumber: number },
-  callbacks: VoiceAnnouncementCallbacks = {}
+  callbacks: SpokenAlertCallbacks = {}
 ): boolean {
   return queueAnnouncement(
-    `Attention please. ${tableLabel(table)} is requesting a waiter. Please attend to the table.`,
-    callbacks
-  );
-}
-
-/** A manual preview that lets staff confirm the installed natural voice. */
-export function previewOrderVoiceAnnouncement(callbacks: VoiceAnnouncementCallbacks = {}): boolean {
-  return queueAnnouncement(
-    'This is your AI restaurant assistant. You have received a new order from Table 1. Please check the order panel.',
+    `${tableLabel(table)} is requesting a waiter. Please attend to the table.`,
     callbacks
   );
 }
 
 /** Stops the current spoken message and clears any waiting messages. */
-export function stopOrderVoiceAnnouncements(): void {
+export function stopSpokenAlerts(): void {
   queueGeneration += 1;
   announcementQueue = [];
   const active = activeAnnouncement;
@@ -337,7 +330,7 @@ export function stopOrderVoiceAnnouncements(): void {
   active.finished = true;
 
   try {
-    if (canSpeak()) window.speechSynthesis.cancel();
+    if (isSpokenAlertSupported()) window.speechSynthesis.cancel();
   } catch {
     // Ignore browser speech cancellation failures.
   }

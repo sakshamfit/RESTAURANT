@@ -26,18 +26,10 @@ import { AdminFeedbacks } from './AdminFeedbacks';
 import {
   announceOrderReceived,
   announceWaiterCall,
-  prepareOrderVoiceAnnouncements,
-  previewOrderVoiceAnnouncement,
-  stopOrderVoiceAnnouncements,
-} from '../utils/orderVoiceAnnouncements';
-import {
-  playOrderChime,
-  playTestSiren,
-  playWaiterSiren,
-  setWaiterSirenDucked,
-  stopWaiterSiren,
-  unlockAudio,
-} from '../utils/alertSounds';
+  isSpokenAlertSupported,
+  prepareSpokenAlerts,
+  stopSpokenAlerts,
+} from '../utils/spokenAlerts';
 
 interface AdminDashboardProps {
   adminEmail: string;
@@ -46,6 +38,9 @@ interface AdminDashboardProps {
 }
 
 type TabType = 'orders' | 'waiter-calls' | 'feedbacks' | 'products' | 'tables' | 'reports' | 'settings';
+
+/** Where the staff member's spoken-alert preference is remembered. */
+const VOICE_ALERTS_PREF_KEY = 'nagori_voice_alerts';
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   adminEmail,
@@ -60,11 +55,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [categories, setCategories] = useState<CafeCategory[]>([]);
   const [settings, setSettings] = useState<CafeSettings | null>(null);
   const [backendHealth, setBackendHealth] = useState<BackendHealth | null>(null);
-  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(true);
+  // Spoken alerts are an operator preference: remembered across reloads and
+  // shared with the orders-toolbar toggle.
+  const [voiceEnabled, setVoiceEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(VOICE_ALERTS_PREF_KEY) !== 'off';
+    } catch {
+      return true;
+    }
+  });
   const [isVoiceAnnouncementActive, setIsVoiceAnnouncementActive] = useState<boolean>(false);
   const [voiceAnnouncementMessage, setVoiceAnnouncementMessage] = useState<string>('');
-  const [waiterAlarmActive, setWaiterAlarmActive] = useState<boolean>(false);
-  const [waiterAlarmTables, setWaiterAlarmTables] = useState<string[]>([]);
+  const [waiterAlertActive, setWaiterAlertActive] = useState<boolean>(false);
+  const [waiterAlertTables, setWaiterAlertTables] = useState<string[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
 
   // We identify incoming orders by their immutable ID, never by a count. That
@@ -76,68 +79,65 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const voiceEnabledRef = useRef<boolean>(true);
 
   // Waiter-call detection: track the set of pending call IDs we already know
-  // about so only genuinely NEW calls trigger the siren/buzzer (old pending
-  // calls sitting from before the dashboard opened do not re-alarm).
+  // about so only genuinely NEW calls raise an alert (pending calls that were
+  // already open before the dashboard loaded do not re-alert).
   const knownPendingCallIdsRef = useRef<Set<string> | null>(null);
-  const waiterAlarmActiveRef = useRef<boolean>(false);
+  const waiterAlertActiveRef = useRef<boolean>(false);
 
   useEffect(() => {
     voiceEnabledRef.current = voiceEnabled;
+    try {
+      localStorage.setItem(VOICE_ALERTS_PREF_KEY, voiceEnabled ? 'on' : 'off');
+    } catch {
+      // Private-mode browsers can refuse localStorage; the toggle still works
+      // for the current session.
+    }
     if (!voiceEnabled) {
-      stopOrderVoiceAnnouncements();
-      stopWaiterSiren();
-      waiterAlarmActiveRef.current = false;
-      setWaiterAlarmActive(false);
+      stopSpokenAlerts();
       setIsVoiceAnnouncementActive(false);
     }
   }, [voiceEnabled]);
 
   const stopVoiceAnnouncement = () => {
-    stopOrderVoiceAnnouncements();
+    stopSpokenAlerts();
     setIsVoiceAnnouncementActive(false);
   };
 
-  /** Stop the waiter siren/buzzer + its spoken announcement. */
-  const stopWaiterAlarm = React.useCallback(() => {
-    stopWaiterSiren();
-    waiterAlarmActiveRef.current = false;
-    setWaiterAlarmActive(false);
-    setWaiterAlarmTables([]);
-    stopOrderVoiceAnnouncements();
+  /** Dismiss the waiter-call banner (the call itself stays until attended). */
+  const dismissWaiterAlert = React.useCallback(() => {
+    waiterAlertActiveRef.current = false;
+    setWaiterAlertActive(false);
+    setWaiterAlertTables([]);
+    stopSpokenAlerts();
     setIsVoiceAnnouncementActive(false);
   }, []);
 
   /**
-   * Fire the loud waiter-call alarm: repeating service-bell siren plus a spoken
-   * "Table X is requesting a waiter" announcement. The siren ducks (lowers)
-   * while the voice speaks so both are clearly heard.
+   * Raise the waiter-call alert: a persistent banner plus a spoken "Table X is
+   * requesting a waiter" announcement. No repeating alarm tone is played — the
+   * banner stays until the table is marked attended or staff dismiss it, so
+   * the dashboard stays usable on a noisy service floor.
    */
-  const triggerWaiterAlarm = React.useCallback((newCalls: WaiterCall[]) => {
+  const raiseWaiterAlert = React.useCallback((newCalls: WaiterCall[]) => {
     if (!voiceEnabledRef.current || newCalls.length === 0) return;
 
-    unlockAudio();
-    playWaiterSiren();
-    waiterAlarmActiveRef.current = true;
-    setWaiterAlarmActive(true);
+    waiterAlertActiveRef.current = true;
+    setWaiterAlertActive(true);
 
     const tableNames = newCalls
       .map((c) => (c.tableName?.trim() || `Table ${c.tableNumber}`))
       .slice(0, 4);
-    setWaiterAlarmTables(tableNames);
+    setWaiterAlertTables(tableNames);
 
     const first = newCalls[0];
     announceWaiterCall(
       { tableName: first.tableName, tableNumber: first.tableNumber },
       {
         onStart: (message) => {
-          setWaiterSirenDucked(true);
-          setVoiceAnnouncementMessage(`🔔 Waiter alert: ${message}`);
+          setVoiceAnnouncementMessage(`Waiter call — ${message}`);
           setIsVoiceAnnouncementActive(true);
         },
-        onFinish: () => {
-          setWaiterSirenDucked(false);
-          setIsVoiceAnnouncementActive(false);
-        },
+        onFinish: () => setIsVoiceAnnouncementActive(false),
       }
     );
   }, []);
@@ -145,17 +145,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const announceOrders = (incomingOrders: Order[]) => {
     if (!voiceEnabledRef.current) return;
 
-    // A pleasant "ding-dong" leads into the spoken message so staff notice it
-    // instantly even if they're not looking at the screen.
-    unlockAudio();
-    playOrderChime();
-
     incomingOrders
       .sort((a, b) => new Date(a.timeline.createdAt).getTime() - new Date(b.timeline.createdAt).getTime())
       .forEach((order) => {
         announceOrderReceived(order, {
           onStart: (message) => {
-            setVoiceAnnouncementMessage(`AI order voice: ${message}`);
+            setVoiceAnnouncementMessage(`Order alert — ${message}`);
             setIsVoiceAnnouncementActive(true);
           },
           onFinish: () => setIsVoiceAnnouncementActive(false),
@@ -165,8 +160,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   /**
    * Observe the waiter-call feed. Only calls that become pending AFTER the
-   * first snapshot (i.e. a customer just pressed "Call Waiter") start the
-   * siren. When every pending call is attended, the alarm stops automatically.
+   * first snapshot (i.e. a customer just pressed "Call Waiter") raise an
+   * alert. When every pending call is attended, the banner clears itself.
    */
   const applyWaiterCalls = (calls: WaiterCall[]) => {
     const pending = calls.filter((call) => call.status === 'pending');
@@ -184,15 +179,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     knownPendingCallIdsRef.current = pendingIds;
 
     if (freshPending.length > 0) {
-      triggerWaiterAlarm(freshPending);
-    } else if (pending.length === 0 && waiterAlarmActiveRef.current) {
-      // Every table has been attended — silence the buzzer.
-      stopWaiterSiren();
-      stopOrderVoiceAnnouncements();
-      waiterAlarmActiveRef.current = false;
-      setWaiterAlarmActive(false);
-      setWaiterAlarmTables([]);
-      setIsVoiceAnnouncementActive(false);
+      raiseWaiterAlert(freshPending);
+    } else if (pending.length === 0 && waiterAlertActiveRef.current) {
+      // Every table has been attended — clear the banner.
+      dismissWaiterAlert();
     }
   };
 
@@ -221,34 +211,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setOrders(nextOrders);
   };
 
-  const handleTestVoice = () => {
-    // A user gesture: unlock both the speech engine and the Web Audio context.
-    unlockAudio();
-    prepareOrderVoiceAnnouncements();
-    playOrderChime();
-    const started = previewOrderVoiceAnnouncement({
-      onStart: (message) => {
-        setVoiceAnnouncementMessage(`AI order voice: ${message}`);
-        setIsVoiceAnnouncementActive(true);
-      },
-      onFinish: () => setIsVoiceAnnouncementActive(false),
-    });
-
-    if (!started) {
-      setVoiceAnnouncementMessage('AI order voice is unavailable in this browser.');
-      setIsVoiceAnnouncementActive(true);
-      window.setTimeout(() => setIsVoiceAnnouncementActive(false), 4_000);
-    }
-  };
-
-  /** Staff self-test for the waiter buzzer/siren (rings ~4 seconds). */
-  const handleTestSiren = () => {
-    unlockAudio();
-    const started = playTestSiren();
-    if (!started) {
-      alert('Sound is not supported in this browser.');
-    }
-  };
+  const spokenAlertsAvailable = isSpokenAlertSupported();
 
   const fetchAllData = async (isInitial = false) => {
     try {
@@ -287,14 +250,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   useEffect(() => {
-    prepareOrderVoiceAnnouncements();
+    prepareSpokenAlerts();
 
-    // Browsers only allow automatic audio after a user gesture. On the first
-    // click/keypress we unlock the Web Audio context (siren/chime) and warm the
-    // speech voice list — no sound plays, it just arms later automatic alerts.
+    // Browsers only allow automatic speech after a user gesture. On the first
+    // click/keypress we warm the speech voice list — nothing is spoken, it just
+    // arms the later automatic announcements.
     const warmAudio = () => {
-      unlockAudio();
-      prepareOrderVoiceAnnouncements();
+      prepareSpokenAlerts();
     };
     window.addEventListener('pointerdown', warmAudio);
     window.addEventListener('keydown', warmAudio);
@@ -313,8 +275,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       window.clearInterval(interval);
       window.removeEventListener('pointerdown', warmAudio);
       window.removeEventListener('keydown', warmAudio);
-      stopOrderVoiceAnnouncements();
-      stopWaiterSiren();
+      stopSpokenAlerts();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -337,32 +298,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     <div className="min-h-screen bg-stone-100 flex flex-col">
       {/* Top Admin Navigation Header */}
       <header className="bg-stone-950 text-white border-b border-stone-800 sticky top-0 z-30 shadow-md">
-        {/* Loud, repeating waiter siren/buzzer alarm — rings until attended or stopped. */}
-        {waiterAlarmActive && (
-          <div className="bg-red-600 text-white px-4 py-2 text-xs font-black flex flex-wrap items-center justify-between gap-2 animate-pulse">
+        {/* Waiter-call banner — stays until the table is attended or dismissed. */}
+        {waiterAlertActive && (
+          <div className="bg-red-600 text-white px-4 py-2 text-xs font-bold flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
-              <BellRing className="w-4 h-4 animate-bounce" />
+              <BellRing className="w-4 h-4 shrink-0" />
               <span>
-                🚨 SIREN: {waiterAlarmTables.length > 0 ? waiterAlarmTables.join(', ') : 'A table'} is
-                requesting a WAITER now!
+                {waiterAlertTables.length > 0 ? waiterAlertTables.join(', ') : 'A table'} is requesting a
+                waiter.
               </span>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => {
-                  stopWaiterAlarm();
+                  dismissWaiterAlert();
                   setActiveTab('waiter-calls');
                 }}
-                className="px-2.5 py-1 bg-white text-red-700 font-black rounded hover:bg-stone-100 transition-colors cursor-pointer text-[11px]"
+                className="px-2.5 py-1 bg-white text-red-700 font-bold rounded hover:bg-stone-100 transition-colors cursor-pointer text-[11px]"
               >
-                Attend / Stop Siren
+                Attend Table
+              </button>
+              <button
+                onClick={dismissWaiterAlert}
+                className="px-2.5 py-1 bg-red-700 text-white font-bold rounded hover:bg-red-800 transition-colors cursor-pointer text-[11px]"
+              >
+                Dismiss
               </button>
             </div>
           </div>
         )}
 
-        {/* Spoken AI voice announcement strip (orders + waiter calls). */}
-        {isVoiceAnnouncementActive && !waiterAlarmActive && (
+        {/* Spoken announcement strip (orders + waiter calls). */}
+        {isVoiceAnnouncementActive && !waiterAlertActive && (
           <div
             role="status"
             aria-live="polite"
@@ -381,16 +348,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         )}
 
-        {/* Visual panel notification for pending waiter calls (after siren is silenced). */}
-        {!waiterAlarmActive && pendingCallsCount > 0 && (
+        {/* Persistent reminder for calls still open after the alert is dismissed. */}
+        {!waiterAlertActive && pendingCallsCount > 0 && (
           <div
             onClick={() => setActiveTab('waiter-calls')}
-            className="bg-amber-500 hover:bg-amber-600 text-stone-950 px-4 py-1.5 text-xs font-black flex items-center justify-between cursor-pointer transition-colors"
+            className="bg-amber-500 hover:bg-amber-600 text-stone-950 px-4 py-1.5 text-xs font-bold flex items-center justify-between cursor-pointer transition-colors"
           >
             <div className="flex items-center gap-2">
-              <Bell className="w-4 h-4 animate-bounce text-stone-950" />
+              <Bell className="w-4 h-4 shrink-0 text-stone-950" />
               <span>
-                🔔 {pendingCallsCount} Table{pendingCallsCount > 1 ? 's are' : ' is'} requesting a Waiter right now! (Click to View Tables)
+                {pendingCallsCount} table{pendingCallsCount > 1 ? 's are' : ' is'} still waiting for a waiter —
+                click to open the waiter screen.
               </span>
             </div>
             <span className="underline text-[11px] font-extrabold">Open Waiter Screen →</span>
@@ -418,31 +386,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-2">
-            {/* Test the natural AI order voice. */}
-            <button
-              type="button"
-              onClick={handleTestVoice}
-              className="py-1.5 px-2.5 rounded-lg bg-orange-950/80 hover:bg-orange-900 border border-orange-800 text-orange-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
-              title="Test AI order voice"
-            >
-              <Volume2 className="w-3.5 h-3.5 text-orange-400" />
-              <span className="hidden md:inline">Test AI Voice</span>
-              <span className="md:hidden">Voice</span>
-            </button>
-
-            {/* Test the waiter siren / buzzer so staff can confirm it works. */}
-            <button
-              type="button"
-              onClick={handleTestSiren}
-              className="py-1.5 px-2.5 rounded-lg bg-red-950/80 hover:bg-red-900 border border-red-800 text-red-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
-              title="Test waiter siren / buzzer"
-            >
-              <BellRing className="w-3.5 h-3.5 text-red-400" />
-              <span className="hidden md:inline">Test Siren</span>
-              <span className="md:hidden">Siren</span>
-            </button>
-
-            {/* Master sound switch: controls BOTH the AI voice and the siren/buzzer. */}
+            {/* Spoken-alert switch (orders + waiter calls). */}
             <button
               type="button"
               onClick={() => setVoiceEnabled((enabled) => !enabled)}
@@ -451,9 +395,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   ? 'bg-orange-500/20 text-orange-400 border-orange-500/40'
                   : 'bg-stone-800 text-stone-500 border-stone-700'
               }`}
-              title={voiceEnabled ? 'Sound alerts (voice + siren) are ON' : 'Sound alerts (voice + siren) are MUTED'}
-              aria-label={voiceEnabled ? 'Mute all sound alerts' : 'Enable all sound alerts'}
+              title={
+                !spokenAlertsAvailable
+                  ? 'Spoken alerts are not supported by this browser'
+                  : voiceEnabled
+                    ? 'Spoken order and waiter alerts are ON'
+                    : 'Spoken order and waiter alerts are MUTED'
+              }
+              aria-label={voiceEnabled ? 'Mute spoken alerts' : 'Enable spoken alerts'}
               aria-pressed={voiceEnabled}
+              disabled={!spokenAlertsAvailable}
             >
               {voiceEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
             </button>

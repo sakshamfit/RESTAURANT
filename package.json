@@ -1,7 +1,7 @@
 {
-  "name": "react-example",
+  "name": "nagori-chai-point",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -9,10 +9,11 @@
     "start": "node dist/server.cjs",
     "preview": "npm run build && node dist/server.cjs",
     "clean": "rm -rf dist server.js api/index.cjs api/*.map",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "desktop:stage": "node scripts/build-desktop.mjs --stage-only",
+    "desktop:build": "node scripts/build-desktop.mjs"
   },
   "dependencies": {
-    "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
     "canvas-confetti": "^1.9.4",
@@ -38,5 +39,6 @@
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.3"
-  }
+  },
+  "description": "QR-based caf\u00e9 food ordering with live order tracking, waiter call alerts, customer reviews and a full admin dashboard. Ships as a web app and an installable desktop console."
 }

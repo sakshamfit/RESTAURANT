@@ -323,20 +323,20 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
               ))}
           </select>
 
-          {/* AI voice toggle kept in the existing order-toolbar position. */}
+          {/* Spoken-alert toggle, kept in the existing order-toolbar position. */}
           <button
             onClick={onToggleVoice}
-            title={voiceEnabled ? 'AI order voice is ON' : 'AI order voice is MUTED'}
+            title={voiceEnabled ? 'Spoken order alerts are ON' : 'Spoken order alerts are MUTED'}
             className={`p-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
               voiceEnabled
                 ? 'bg-orange-100 border-orange-300 text-orange-950'
                 : 'bg-stone-100 border-stone-200 text-stone-500'
             }`}
-            aria-label={voiceEnabled ? 'Mute AI order voice' : 'Enable AI order voice'}
+            aria-label={voiceEnabled ? 'Mute spoken order alerts' : 'Enable spoken order alerts'}
             aria-pressed={voiceEnabled}
           >
             {voiceEnabled ? <Volume2 className="w-4 h-4 text-orange-600" /> : <VolumeX className="w-4 h-4" />}
-            <span className="hidden sm:inline">{voiceEnabled ? 'AI Voice ON' : 'AI Voice OFF'}</span>
+            <span className="hidden sm:inline">{voiceEnabled ? 'Voice ON' : 'Voice OFF'}</span>
           </button>
 
           {/* Refresh Button */}
