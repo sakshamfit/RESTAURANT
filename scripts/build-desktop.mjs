@@ -27,10 +27,21 @@ const flags = ['--win', '--linux', '--mac', '--dir', '--publish'].filter((f) => 
 const stageOnly = args.includes('--stage-only');
 const skipBuild = args.includes('--skip-build');
 
+// On Windows, npm/npx are .cmd shims, so these must run through a shell.
+// Arguments are quoted so paths containing spaces survive the shell.
+function quoteArg(arg) {
+  return /\s/.test(arg) ? `"${arg}"` : arg;
+}
+
 function run(cmd, argv, opts = {}) {
-  const result = spawnSync(cmd, argv, { cwd: opts.cwd ?? rootDir, stdio: 'inherit', shell: false });
+  const result = spawnSync(cmd, argv.map(quoteArg), {
+    cwd: opts.cwd ?? rootDir,
+    stdio: 'inherit',
+    shell: true,
+  });
   if (result.status !== 0) {
-    console.error(`\nCommand failed: ${cmd} ${argv.join(' ')}`);
+    const why = result.error ? ` (${result.error.message})` : '';
+    console.error(`\nCommand failed: ${cmd} ${argv.join(' ')}${why}`);
     process.exit(result.status ?? 1);
   }
 }
