@@ -18,6 +18,7 @@ import type {
 } from '../types.js';
 import { store, postgresConfigured, newId } from './store.js';
 import { initialSettings } from './seed.js';
+import { parseTimezoneOffsetMinutes, startOfDayInZone, startOfMonthInZone } from './dates.js';
 import {
   changeAdminPassword,
   getAdminAuthConfigurationError,
@@ -424,6 +425,35 @@ export function createApp() {
     }
   });
 
+  // Read-only lookup of the orders placed from one phone. The customer's
+  // browser remembers the IDs of the orders it submitted (localStorage) and
+  // sends them here. IDs are unguessable (ord- + 8 random bytes) and the
+  // existing track-by-ID endpoint above already exposes a single order by ID,
+  // so this adds no new exposure — it just batches that lookup so the "My
+  // Orders" screen on the customer's phone can show every order they placed,
+  // across tables and past visits, with the date it was placed.
+  app.post('/api/orders/lookup', async (req, res) => {
+    try {
+      const rawIds = Array.isArray(req.body?.ids) ? req.body.ids : [];
+      const wanted = new Set(
+        rawIds
+          .map((id: unknown) => getIdentifier(id).slice(0, 64))
+          .filter((id: string) => id.length > 0)
+      );
+      // Bounded so a huge or malicious body can never make this scan heavy.
+      if (wanted.size === 0) return res.json({ orders: [] });
+      const limit = Array.from(wanted).slice(0, 200);
+      const limitSet = new Set(limit);
+      const orders = (await store.list('orders'))
+        .filter((order) => limitSet.has(order.id))
+        .sort((a, b) => new Date(b.timeline.createdAt).getTime() - new Date(a.timeline.createdAt).getTime());
+      res.json({ orders });
+    } catch (error) {
+      console.error('Order lookup error:', error);
+      jsonError(res, 500, 'Unable to load your orders from the café database.');
+    }
+  });
+
   app.post('/api/waiter-call', async (req, res) => {
     try {
       const { tableToken, tableId, tableNumber, tableName, customerName } = req.body || {};
@@ -747,14 +777,34 @@ export function createApp() {
 
   app.get('/api/admin/reports', requireAdminAuth, async (req, res) => {
     const { range = 'today', startDate, endDate } = req.query;
+    // The dashboard sends its timezone offset so day ranges follow the
+    // operator's local clock: "Today" starts at THEIR 12:00 AM, not the
+    // server's (a UTC serverless region would otherwise roll the day at
+    // 5:30 AM IST). Without the offset, the server's own local time is used.
+    const tzOffsetMinutes = parseTimezoneOffsetMinutes(req.query.tzOffsetMinutes);
+
     const nowDate = new Date();
+    const startOfLocalDay = (base: Date) =>
+      tzOffsetMinutes !== null
+        ? startOfDayInZone(base, tzOffsetMinutes)
+        : new Date(base.getFullYear(), base.getMonth(), base.getDate());
+
     let filterStart = new Date(0);
     let filterEnd = new Date();
-    if (range === 'today') filterStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate());
-    else if (range === 'yesterday') { filterStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - 1); filterEnd = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() - 1, 23, 59, 59, 999); }
-    else if (range === 'week') filterStart = new Date(nowDate.getTime() - 7 * 24 * 60 * 60 * 1000);
-    else if (range === 'month') filterStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
-    else if (range === 'custom' && startDate && endDate) { filterStart = new Date(String(startDate)); filterEnd = new Date(String(endDate)); }
+    if (range === 'today') {
+      filterStart = startOfLocalDay(nowDate);
+    } else if (range === 'yesterday') {
+      const todayStart = startOfLocalDay(nowDate);
+      filterStart = startOfLocalDay(new Date(todayStart.getTime() - 1));
+      filterEnd = new Date(todayStart.getTime() - 1);
+    } else if (range === 'week') {
+      filterStart = new Date(nowDate.getTime() - 7 * 24 * 60 * 60 * 1000);
+    } else if (range === 'month') {
+      filterStart =
+        tzOffsetMinutes !== null
+          ? startOfMonthInZone(nowDate, tzOffsetMinutes)
+          : new Date(nowDate.getFullYear(), nowDate.getMonth(), 1);
+    } else if (range === 'custom' && startDate && endDate) { filterStart = new Date(String(startDate)); filterEnd = new Date(String(endDate)); }
 
     const orders = (await store.list('orders')).filter((order) => { const date = new Date(order.timeline.createdAt); return date >= filterStart && date <= filterEnd; });
     const completedOrders = orders.filter((order) => order.status === 'completed');

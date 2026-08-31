@@ -20,6 +20,8 @@ import {
 } from 'lucide-react';
 import { Order, OrderStatus, PaymentStatus, CafeSettings } from '../types';
 import { api, generateWhatsAppOrderUrl } from '../services/api';
+import { useToday } from '../utils/useToday';
+import { formatOrderStamp, isSameLocalDay } from '../utils/datetime';
 
 interface AdminOrdersProps {
   orders: Order[];
@@ -41,16 +43,15 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
   const [selectedTable, setSelectedTable] = useState<string>('all');
   const [updatingId, setUpdatingId] = useState<string | null>(null);
 
+  // Pinned to the current local calendar day and re-rendered automatically the
+  // moment the clock crosses 12:00 AM — that is what makes the "Today's Live"
+  // feed reset itself every midnight, even on a dashboard left open for days.
+  const today = useToday();
+
   // Helper to check if order was created today
   const isOrderToday = (dateString?: string) => {
     if (!dateString) return false;
-    const d = new Date(dateString);
-    const now = new Date();
-    return (
-      d.getFullYear() === now.getFullYear() &&
-      d.getMonth() === now.getMonth() &&
-      d.getDate() === now.getDate()
-    );
+    return isSameLocalDay(dateString, today);
   };
 
   // Status & Date Filter
@@ -172,7 +173,7 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
   const cookingOrdersCount = orders.filter((o) => o.status === 'accepted').length;
   const readyOrdersCount = orders.filter((o) => o.status === 'ready').length;
 
-  const todayFormatted = new Date().toLocaleDateString('en-IN', {
+  const todayFormatted = today.toLocaleDateString('en-IN', {
     weekday: 'short',
     day: 'numeric',
     month: 'short',
@@ -418,7 +419,7 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
                       </span>
                       <span className="text-stone-500 flex items-center gap-1">
                         <Clock className="w-3 h-3" />
-                        <span>{new Date(order.timeline.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                        <span>{formatOrderStamp(order.timeline.createdAt, today)}</span>
                       </span>
                     </div>
 
