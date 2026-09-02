@@ -40,8 +40,11 @@ The server checks:
 
 On success, the server:
 1. Records `fingerprint` as the bound machine for this key.
-2. Mints a signed JWT containing the payload below. **Use the same
-   `LICENSE_SIGNING_SECRET` the desktop app was built with.**
+2. Mints a signed JWT containing the payload below. **Sign it with the
+   RSA private key in `LICENSE_PRIVATE_KEY` — the matching public key is
+   baked into the desktop build (`license-keys/public.pem`), so the
+   installer contains no secret at all.** (Legacy HS256 via
+   `LICENSE_SIGNING_SECRET` still works for existing deployments.)
 3. Returns `{ ok: true, token, payload }`.
 
 The JWT payload (matches `LicensePayload` in `src/server/license.ts`):
@@ -126,11 +129,29 @@ A complete reference implementation lives in [`license-server/`](license-server/
 a Vercel-deployable Node.js + Postgres app that exposes all three
 endpoints plus a single-page admin UI for issuing and revoking keys.
 
+First generate an RSA keypair (once, keep it safe):
+
+```bash
+mkdir -p license-keys
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out license-keys/private-key.pem
+openssl pkey -in license-keys/private-key.pem -pubout -out license-keys/public.pem
+```
+
+- `license-keys/public.pem` goes into the app repo (it is committed there
+  as `license-keys/public.pem`) and is baked into every installer.
+- `license-keys/private-key.pem` NEVER enters a repo — paste it into the
+  license server's `LICENSE_PRIVATE_KEY` env var (Vercel secrets panel
+  accepts multi-line values).
+- Rotating keys = deploy the new private key on the server AND commit the
+  new public key + rebuild every installer.
+
+Then deploy:
+
 ```bash
 cd license-server
 npm install
 npx vercel link
-npx vercel env add LICENSE_SIGNING_SECRET production
+npx vercel env add LICENSE_PRIVATE_KEY production
 npx vercel env add LICENSE_ADMIN_PASSWORD production
 npx vercel env add POSTGRES_URL production
 POSTGRES_URL=... node scripts/migrate.js
@@ -172,6 +193,19 @@ free Supabase / Neon project. The license server is small enough to
 deploy on Vercel's free tier as a single serverless function; just
 point `LICENSE_API_BASE` at the deployed URL when you build the
 desktop installer.
+
+## Wiring the release build to your server
+
+`LICENSE_API_BASE` and the RSA **public key** are baked into the
+installer by `scripts/build-desktop.mjs` (see `build-env.json` in
+`desktop/README.md`) — the packaged app cannot read a builder's
+environment. The public key is read from `license-keys/public.pem` in
+the repo, so the CI workflow (`.github/workflows/desktop-release.yml`)
+needs no secrets at all; only the optional Variable `LICENSE_API_BASE`
+(defaults to `https://license.nexoraosp.com`). The private key stays on
+the license server. If the public key baked into the installer does not
+match the private key on the server, activation fails with
+`invalid signature` — that is the correct failure mode.
 
 ## Why a JWT, not a server-roundtrip-per-request
 

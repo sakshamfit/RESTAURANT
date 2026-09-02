@@ -23,7 +23,12 @@ const desktopDir = path.join(rootDir, 'desktop');
 const stageDir = path.join(desktopDir, 'app');
 const args = process.argv.slice(2);
 
-const flags = ['--win', '--linux', '--mac', '--dir', '--publish'].filter((f) => args.includes(f));
+const flags = ['--win', '--linux', '--mac', '--dir'].filter((f) => args.includes(f));
+// `--publish never|always|onTag` is passed through with its value (a bare
+// `--publish` alone would make electron-builder try to publish to GitHub).
+const publishIndex = args.indexOf('--publish');
+const publishArgs =
+  publishIndex >= 0 ? ['--publish', args[publishIndex + 1] === 'never' || args[publishIndex + 1] === 'always' || args[publishIndex + 1] === 'onTag' ? args[publishIndex + 1] : 'never'] : [];
 const stageOnly = args.includes('--stage-only');
 const skipBuild = args.includes('--skip-build');
 
@@ -65,13 +70,65 @@ run('npx', [
   '--outfile=' + path.join(stageDir, 'server.cjs'),
 ]);
 
-console.log('→ 3/4  Staging web assets and schema');
+console.log('→ 3/4  Staging web assets, schema and build settings');
 // Copy the browser build (index.html + assets) but not the node server bundle.
 cpSync(path.join(rootDir, 'dist', 'index.html'), path.join(stageDir, 'dist', 'index.html'));
 if (existsSync(path.join(rootDir, 'dist', 'assets'))) {
   cpSync(path.join(rootDir, 'dist', 'assets'), path.join(stageDir, 'dist', 'assets'), { recursive: true });
 }
 cpSync(path.join(rootDir, 'db', 'schema.sql'), path.join(stageDir, 'db', 'schema.sql'));
+
+// ── Bake vendor / license configuration into the staged app ─────────────────
+// The packaged app cannot see the environment of the machine that BUILT the
+// installer (env vars are not embedded by electron-builder), so the
+// distribution settings — the license gate, the license-server URL, the
+// signing secret, and the admin password/email — are written into
+// desktop/app/build-env.json. desktop/main.cjs merges this file into the
+// bundled server's environment on every launch. The file lives in the
+// git-ignored desktop/app/ staging folder and only ever ships inside the
+// installer; the signing secret must match the license server's
+// LICENSE_SIGNING_SECRET exactly or activations fail with a signature error.
+const BAKE_KEYS = [
+  'LICENSE_REQUIRED',
+  'LICENSE_API_BASE',
+  'LICENSE_PUBLIC_KEY',
+  'LICENSE_SIGNING_SECRET',
+  'LICENSE_ALLOW_SELF_ISSUE',
+  'LICENSE_TRIAL_DAYS',
+  'ADMIN_PASSWORD',
+  'ADMIN_EMAIL',
+  'ADMIN_SESSION_SECRET',
+  'DATABASE_URL',
+  'DIRECT_URL',
+];
+const baked = {};
+for (const key of BAKE_KEYS) {
+  const value = process.env[key];
+  if (value !== undefined && value !== '') baked[key] = value;
+}
+// Distributed builds verify license JWTs with the RSA PUBLIC key only; the
+// private key never leaves the license server. The public key ships with
+// the repo (license-keys/public.pem) so CI needs no secret at all. Explicit
+// LICENSE_PUBLIC_KEY env (with literal \n escapes) still wins.
+if (baked.LICENSE_REQUIRED === 'true' && !baked.LICENSE_PUBLIC_KEY) {
+  const publicKeyPath = path.join(rootDir, 'license-keys', 'public.pem');
+  if (existsSync(publicKeyPath)) {
+    baked.LICENSE_PUBLIC_KEY = readFileSync(publicKeyPath, 'utf8').trim();
+  }
+}
+writeFileSync(path.join(stageDir, 'build-env.json'), JSON.stringify(baked, null, 2) + '\n');
+if (baked.LICENSE_REQUIRED === 'true') {
+  console.log(`   baked license gate: REQUIRED, API=${baked.LICENSE_API_BASE || '(unset!)'}, trial=${baked.LICENSE_TRIAL_DAYS ?? '14'}d, self-issue=${baked.LICENSE_ALLOW_SELF_ISSUE || 'false'}`);
+  if (!baked.LICENSE_PUBLIC_KEY) {
+    console.error('   ⚠ LICENSE_REQUIRED=true but no license public key — set LICENSE_PUBLIC_KEY or keep license-keys/public.pem in the repo. The app could not verify license tokens. Aborting.');
+    process.exit(1);
+  }
+  if (baked.LICENSE_SIGNING_SECRET) {
+    console.warn('   ⚠ LICENSE_SIGNING_SECRET is set — prefer the RSA public key (license-keys/public.pem) so the installer never contains a signing secret.');
+  }
+} else {
+  console.log('   license gate not enabled (LICENSE_REQUIRED is not "true") — this installer is an open build.');
+}
 
 // Keep the desktop package version in lock-step with the root one.
 const rootVersion = JSON.parse(readFileSync(path.join(rootDir, 'package.json'), 'utf8')).version;
@@ -92,5 +149,5 @@ console.log('→ 4/4  Installing desktop toolchain and running electron-builder'
 if (!existsSync(path.join(desktopDir, 'node_modules', '.bin'))) {
   run('npm', ['install', '--no-audit', '--no-fund'], { cwd: desktopDir });
 }
-run('npx', ['electron-builder', ...(flags.length ? flags : [])], { cwd: desktopDir });
+run('npx', ['electron-builder', ...flags, ...publishArgs], { cwd: desktopDir });
 console.log('\n✓ Desktop installers written to release/');

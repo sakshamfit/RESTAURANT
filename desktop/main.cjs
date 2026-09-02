@@ -167,13 +167,33 @@ function waitForServer(port, timeoutMs) {
   });
 }
 
+/**
+ * Vendor settings baked into the installer by scripts/build-desktop.mjs
+ * (LICENSE_REQUIRED, LICENSE_API_BASE, LICENSE_SIGNING_SECRET, trials,
+ * ADMIN_PASSWORD, …). Environment variables are NOT preserved when an
+ * installer is packaged, so this file IS the way the release build is
+ * configured. It is intentionally loaded AFTER process.env: the baked
+ * contract wins over whatever the customer's machine has set.
+ */
+function loadBakedEnv() {
+  const file = path.join(resourcesDir(), 'build-env.json');
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {}; // Dev shell or a build staged without bake settings.
+  }
+}
+
 function spawnServer(port) {
+  const buildEnv = loadBakedEnv();
   const child = fork(serverEntry(), [], {
     execPath: process.execPath,
     cwd: resourcesDir(),
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     env: {
       ...process.env,
+      ...buildEnv,
       ELECTRON_RUN_AS_NODE: '1',
       NODE_ENV: 'production',
       // Bind to every interface so customer phones on the same Wi-Fi can

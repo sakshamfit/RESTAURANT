@@ -111,6 +111,12 @@ export interface LicenseStatusResponse {
   status: LicenseStatusPayload;
   trialDays: number;
   trialAvailable: boolean;
+  /**
+   * Distributed builds: true while the staff console still uses the
+   * built-in default password. The wizard then asks the owner to choose
+   * one immediately after activation (one-time, local; never an account).
+   */
+  passwordSetupRequired?: boolean;
 }
 
 export interface ActivateResponse {
@@ -239,6 +245,24 @@ export const licenseService = {
       throw new Error(err.error || 'Could not start trial.');
     }
     return res.json();
+  },
+
+  /**
+   * One-time staff-console password setup, shown right after license
+   * activation in distributed builds. Replaces the built-in default
+   * password on THIS machine only — it is not an account signup.
+   */
+  async setupStaffPassword(password: string, confirmPassword: string): Promise<{ ok: boolean; error?: string }> {
+    const res = await fetchWithRetry(`${API_BASE}/admin/setup-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password, confirmPassword }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { ok: false, error: body?.error || 'Could not save the staff password.' };
+    }
+    return { ok: true };
   },
 };
 

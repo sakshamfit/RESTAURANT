@@ -26,6 +26,8 @@ import {
   getAdminAuthConfigurationError,
   getAdminEmail,
   getAdminSessionSecret,
+  isInitialAdminPassword,
+  setInitialAdminPassword,
   verifyAdminPassword,
 } from './auth.js';
 import {
@@ -1044,6 +1046,11 @@ export function createApp() {
       status,
       trialDays: getTrialDays(),
       trialAvailable: getTrialDays() > 0,
+      // Distributed builds: a fresh install still runs on the built-in
+      // default password. The wizard asks the owner to choose one right
+      // after activation, before the console is reachable from the café
+      // Wi-Fi. Always false when ADMIN_PASSWORD comes from the environment.
+      passwordSetupRequired: isInitialAdminPassword(),
     });
   }));
 
@@ -1058,6 +1065,28 @@ export function createApp() {
     // file exists yet, and returns the existing license otherwise.
     const status = await verifyLicense();
     res.json({ ok: true, trialDays: getTrialDays(), status });
+  }));
+
+  // One-time staff-console password for distributed builds. Runs right
+  // after license activation: the owner picks a password before the
+  // console is reachable from phones on the café Wi-Fi. This is not a
+  // signup — no account is created anywhere; it only replaces the
+  // built-in default password on this machine. Refused once a password
+  // has been set (or when the build ships a vendor-controlled
+  // ADMIN_PASSWORD).
+  app.post('/api/admin/setup-password', asyncRoute(async (req, res) => {
+    if (!isLicenseRequired()) {
+      return res.json({ ok: false, error: 'This build does not require a license.' });
+    }
+    const status = await verifyLicense();
+    if (status.state !== 'active') {
+      return res.status(402).json({ ok: false, error: 'Activate your license before setting the staff password.' });
+    }
+    const password = getIdentifier(req.body?.password);
+    const confirm = getIdentifier(req.body?.confirmPassword);
+    const result = await setInitialAdminPassword(password, confirm);
+    if (!result.ok) return res.status(400).json({ ok: false, error: result.message });
+    res.json({ ok: true, message: result.message });
   }));
 
   app.post('/api/license/activate', asyncRoute(async (req, res) => {
