@@ -49,12 +49,34 @@ npm run desktop:build -- --mac   # macOS dmg (build on macOS)
 Installers land in `release/` at the repo root, named
 `nexoraosp-restaurant-<version>-<os>-<arch>.<ext>`.
 
+### Baking distribution settings (license gate, admin identity)
+
+The packaged app cannot read the environment of the machine that built
+the installer, so `scripts/build-desktop.mjs` writes the settings you
+export into `desktop/app/build-env.json`, and `desktop/main.cjs` merges
+that file into the bundled server's environment on every launch. Baked
+keys: `LICENSE_REQUIRED`, `LICENSE_API_BASE`, `LICENSE_PUBLIC_KEY`,
+(optional legacy `LICENSE_SIGNING_SECRET`), `LICENSE_ALLOW_SELF_ISSUE`,
+`LICENSE_TRIAL_DAYS`, `ADMIN_PASSWORD`, `ADMIN_EMAIL`,
+`ADMIN_SESSION_SECRET`, `DATABASE_URL`, `DIRECT_URL`.
+
+In license-gated builds the RSA **public** key comes from
+`license-keys/public.pem` in the repo (or an explicit
+`LICENSE_PUBLIC_KEY`); the private key never leaves the license server.
+
+Customer builds use `LICENSE_REQUIRED=true`, `LICENSE_TRIAL_DAYS=0`,
+`LICENSE_ALLOW_SELF_ISSUE=false` and no `ADMIN_PASSWORD` — the owner
+picks their own staff password right after license activation.
+
 ## Automated builds
 
 `.github/workflows/desktop-release.yml` packages all three platforms on
-GitHub runners (where the Electron binaries are always reachable) and uploads
-the installers as artifacts. It runs on `v*` tags and can also be launched
-manually from the Actions tab once merged into `main`.
+GitHub runners (where the Electron binaries are always reachable) and
+publishes them to a GitHub Release. It runs on `v*` tags and can also be
+launched manually from the Actions tab once merged into `main`. It reads
+`LICENSE_API_BASE` from the optional repository **variable**
+`LICENSE_API_BASE` (default `https://license.nexoraosp.com`) and needs
+no secrets — the public key ships in the repo.
 
 ## Notes for operators
 

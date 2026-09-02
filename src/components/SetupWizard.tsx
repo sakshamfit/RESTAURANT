@@ -24,19 +24,24 @@ interface SetupWizardProps {
   onComplete: () => void;
 }
 
-type Step = 'checking' | 'choose' | 'cafe' | 'license' | 'admin' | 'done';
+type Step = 'checking' | 'choose' | 'cafe' | 'license' | 'admin' | 'console' | 'done';
 
 /**
  * First-run setup wizard.
  *
- * Three paths, all sharing the same shell:
+ * Four paths, all sharing the same shell:
  *   1. License NOT required (self-hosted / dev): the wizard collects
  *      café name + admin password and finishes without ever asking for a
  *      license key.
- *   2. License REQUIRED with trial available (default distributed build):
- *      user picks "Start free trial" or "I have a license key", then
- *      café name (+ email + key, or just café name for trial).
- *   3. License REQUIRED, no trial: forces license activation.
+ *   2. License REQUIRED with trial available: user picks "Start free
+ *      trial" or "I have a license key", then café name (+ email + key,
+ *      or just café name for trial).
+ *   3. License REQUIRED, no trial (customer build): the wizard goes
+ *      straight to the credential form — café name, then the email +
+ *      license key we emailed the customer. No signup, no account.
+ *   4. After activation on a fresh machine, the wizard asks for a
+ *      one-time staff-console password (distributed builds only, while
+ *      the built-in default password is still in use).
  */
 export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
   const [status, setStatus] = useState<LicenseStatusResponse | null>(null);
@@ -46,6 +51,7 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
   const [licenseKey, setLicenseKey] = useState<string>('');
   const [adminPassword, setAdminPassword] = useState<string>('');
   const [confirmPassword, setConfirmPassword] = useState<string>('');
+  const [passwordSetupRequired, setPasswordSetupRequired] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -56,13 +62,23 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
         const s = await licenseService.getStatus();
         if (cancelled) return;
         setStatus(s);
-        // Already activated? Skip the wizard.
+        const needsPassword = s.passwordSetupRequired === true;
+        setPasswordSetupRequired(needsPassword);
+        // Already activated? Skip the wizard — unless the fresh install
+        // still runs on the built-in default password (the owner must
+        // secure the console before it opens to café Wi-Fi).
         if (s.status.state === 'active') {
+          if (needsPassword) {
+            setStep('console');
+            return;
+          }
           onComplete();
           return;
         }
         if (s.licenseRequired) {
-          setStep('choose');
+          // Customer builds ship with trials disabled (LICENSE_TRIAL_DAYS=0):
+          // skip the choice screen and go straight to the credential form.
+          setStep(s.trialAvailable ? 'choose' : 'cafe');
         } else {
           setStep('cafe');
         }
@@ -144,8 +160,10 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
       } catch {
         // ignore
       }
-      setStep('done');
-      window.setTimeout(onComplete, 800);
+      // Fresh machines must secure their staff console first (one-time,
+      // local password — not an account). Existing installs go straight in.
+      setStep(passwordSetupRequired ? 'console' : 'done');
+      if (!passwordSetupRequired) window.setTimeout(onComplete, 800);
     } catch (err: any) {
       setError(err?.message || 'Activation request failed.');
     } finally {
@@ -172,10 +190,44 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
       } catch {
         // ignore
       }
+      setStep(passwordSetupRequired ? 'console' : 'done');
+      if (!passwordSetupRequired) window.setTimeout(onComplete, 800);
+    } catch (err: any) {
+      setError(err?.message || 'Could not start the trial.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  /**
+   * One-time staff-console password (distributed builds only). This is NOT
+   * a signup: it just replaces the built-in default password on this
+   * machine, so the console is not open to phones on the café Wi-Fi before
+   * the owner secures it. The vendor-set credentials (email + license key)
+   * were already accepted above.
+   */
+  const handleConsoleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (adminPassword.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+    if (adminPassword !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const result = await licenseService.setupStaffPassword(adminPassword, confirmPassword);
+      if (!result.ok) {
+        setError(result.error || 'Could not save the staff password.');
+        return;
+      }
       setStep('done');
       window.setTimeout(onComplete, 800);
     } catch (err: any) {
-      setError(err?.message || 'Could not start the trial.');
+      setError(err?.message || 'Could not save the staff password.');
     } finally {
       setSubmitting(false);
     }
@@ -599,6 +651,73 @@ export const SetupWizard: React.FC<SetupWizardProps> = ({ onComplete }) => {
                   )}
                 </button>
               </div>
+            </form>
+          )}
+
+          {/* One-time staff-console password (distributed builds, fresh machine) */}
+          {step === 'console' && (
+            <form onSubmit={handleConsoleSubmit} className="space-y-4">
+              <div>
+                <h2 className="font-bold text-base text-[#1e130c] flex items-center gap-2">
+                  <ShieldCheck className="w-4 h-4 text-[#ea580c]" />
+                  Set your staff-console password
+                </h2>
+                <p className="text-[11px] text-[#6b5d52] mt-0.5">
+                  Your license is active. Choose the password you'll use to open the
+                  staff console on this computer. You can change it any time from
+                  Café Settings.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-[#6b5d52] uppercase tracking-wider mb-1">
+                  Password *
+                </label>
+                <input
+                  type="password"
+                  required
+                  autoFocus
+                  minLength={6}
+                  placeholder="At least 6 characters"
+                  value={adminPassword}
+                  onChange={(e) => setAdminPassword(e.target.value)}
+                  className="w-full px-3 py-2.5 bg-[#faf8f5] border border-[#e7e2dc] rounded-xl text-sm font-bold text-[#1e130c] focus:bg-white focus:ring-2 focus:ring-[#ea580c] focus:border-[#ea580c] outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-[#6b5d52] uppercase tracking-wider mb-1">
+                  Confirm password *
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  placeholder="Type the same password again"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="w-full px-3 py-2.5 bg-[#faf8f5] border border-[#e7e2dc] rounded-xl text-sm font-bold text-[#1e130c] focus:bg-white focus:ring-2 focus:ring-[#ea580c] focus:border-[#ea580c] outline-none"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="w-full py-3 bg-[#ea580c] hover:bg-[#c2410c] disabled:bg-stone-300 text-white font-bold text-sm rounded-xl shadow-md flex items-center justify-center gap-2 transition-colors"
+              >
+                {submitting ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Saving…
+                  </>
+                ) : (
+                  <>
+                    <ShieldCheck className="w-4 h-4" />
+                    Open Console
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
             </form>
           )}
 
