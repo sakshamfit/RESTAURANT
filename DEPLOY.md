@@ -5,6 +5,25 @@ No Firebase, no Supabase, no paid services.
 
 ## Live site not working? — 2-minute triage
 
+### Step 0 — the URL shows a Vercel error page instead of the app
+
+If `https://nexoraosp-restaurant.vercel.app/api/health` does **not** return JSON
+at all, the problem is the project's **domain / access settings**, not the code.
+The build can be green and the deployment perfectly healthy while the public
+hostname points at nothing. Fix it in the Vercel dashboard (the project
+connected to this repo is currently **`restaurant`** in the **`near-connect`**
+team — the Vercel bot comment on every pull request links straight to it):
+
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| Vercel page **`404: NOT_FOUND`**, code **`DEPLOYMENT_NOT_FOUND`** | No deployment is attached to this hostname: the project has **no production domain** (it was removed, or the project was created/renamed under a different name). | Vercel → Project → **Settings → Domains → Add** `nexoraosp-restaurant.vercel.app` (if Vercel says it is taken, pick another `<name>.vercel.app`) and leave it assigned to **Production**. Renaming the project to `nexoraosp-restaurant` under **Settings → General → Project Name** assigns that domain automatically. Takes effect within seconds — **no redeploy needed** (redeploying does not attach a domain). |
+| Redirect to **vercel.com/login** ("Protected Deployment") | You opened a *deployment* URL (`restaurant-<hash>-<team>.vercel.app`, `restaurant-git-main-<team>.vercel.app`, `restaurant-<team>.vercel.app`) and **Deployment Protection** is on — those URLs are staff-only by design and are **not** the customer-facing site. | Use the production domain above. If the production domain *itself* asks for a Vercel login, go to **Settings → Deployment Protection** and set Vercel Authentication to **Standard Protection** (production public, previews private) or **Disabled**, then reload. |
+| **Error** / red status on the latest deployment under **Deployments** | The code did not build. | Open the failed deployment → **Build Logs**; reproduce locally with `npm run build`. |
+
+Once the domain answers, continue below.
+
+### Step 1 — read `/api/health`
+
 Open **`https://nexoraosp-restaurant.vercel.app/api/health`** and read one field:
 
 | What you see | What it means | What to do |
