@@ -123,7 +123,16 @@ function normalizeConnectionString(name: string, rawValue: string): string {
 }
 
 const pgUrl = normalizeConnectionString('DATABASE_URL', process.env.DATABASE_URL || '');
-const pgDirectUrl = normalizeConnectionString('DIRECT_URL', process.env.DIRECT_URL || '') || pgUrl;
+/**
+ * Only set when DIRECT_URL is explicitly configured. It deliberately does NOT
+ * fall back to pgUrl: the schema migration picks
+ * `pgDirectUrl || deriveDirectPgUrl(pgUrl) || pgUrl`, and defaulting this to
+ * pgUrl made that first branch always win, so deriveDirectPgUrl() was dead code
+ * and DDL always ran on the pooled endpoint. Neon's pooler (PgBouncer) rejects
+ * `create extension` / multi-statement transactions, which broke first-boot
+ * schema creation on a fresh Neon database.
+ */
+const pgDirectUrl = normalizeConnectionString('DIRECT_URL', process.env.DIRECT_URL || '');
 export const postgresConfigured = Boolean(pgUrl);
 
 /** Validates the configured URL as early as possible (cheap, no network). */
@@ -294,6 +303,11 @@ function deriveDirectPgUrl(pooledUrl: string): string | null {
     url.hostname = url.hostname.replace('-pooler', '');
     url.searchParams.delete('pgbouncer');
     url.searchParams.delete('connection_limit');
+    // `channel_binding=require` (Neon's default copy-paste string) is a libpq
+    // option that node-postgres does not implement. Left in place it makes the
+    // driver fail the handshake against the direct endpoint, so the automatic
+    // schema migration never runs on a brand-new database.
+    url.searchParams.delete('channel_binding');
     return url.toString();
   } catch {
     return null;
