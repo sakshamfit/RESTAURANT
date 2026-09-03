@@ -180,7 +180,22 @@ export function pgErrorHint(error: { code?: string; message: string }, host: str
   if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(message)) {
     return `The host in DATABASE_URL could not be resolved. Re-copy the connection string from your provider dashboard (a hand-edited hostname is usually the cause).`;
   }
-  if (/ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|network is unreachable|connect ETIMEDOUT/i.test(message)) {
+  if (
+    /ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|network is unreachable|connect ETIMEDOUT|timeout expired|timed out|Connection terminated unexpectedly/i.test(
+      message
+    )
+  ) {
+    if (/pooler\.supabase\.com/i.test(host)) {
+      const poolerPrefix = host.split('-').slice(0, 2).join('-');
+      return (
+        `The Supabase connection pooler at ${host} accepted no connection before the timeout. The usual cause is a stale pooler ` +
+        `hostname: Supabase assigns each project a numbered pooler (e.g. aws-0-…, aws-1-…) and projects get moved between them, ` +
+        `so a URL saved months ago can point at the wrong one (currently "${poolerPrefix}"). It also happens when the project is ` +
+        `paused — free projects pause after ~1 week idle and refuse all connections until restored. ` +
+        `Fix: open Supabase → your project (restore it if the dashboard shows "Paused") → Settings → Database → Connection string → ` +
+        `Session pooler, copy the URI verbatim, paste it into Vercel → Settings → Environment Variables → DATABASE_URL, then redeploy.`
+      );
+    }
     return `The database host could not be reached. Check that the host/port in DATABASE_URL match the provider dashboard and that the provider allows connections from anywhere (${provider} defaults allow this).`;
   }
   if (/does not support SSL|SSL is not enabled|no pg_hba/i.test(message)) {
@@ -203,7 +218,36 @@ export function pgErrorHint(error: { code?: string; message: string }, host: str
 }
 
 const PG_FAMILY = 4;
-const PG_TIMEOUT_MS = Number(process.env.PG_CONNECT_TIMEOUT_MS || 15000);
+// Kept well under the serverless request budget: a single cold start may chain
+// an SSL probe + a schema query, and each one waiting 15s used to blow past the
+// function's maxDuration before any response was written.
+const PG_TIMEOUT_MS = Number(process.env.PG_CONNECT_TIMEOUT_MS || 5000);
+/**
+ * Hard ceiling for one complete Postgres bootstrap attempt. Unreachable hosts
+ * fail by timing out (not by refusing), so without an overall deadline the
+ * chain of probe → schema check → seed can stall far longer than any single
+ * connectionTimeoutMillis suggests.
+ */
+const PG_BOOTSTRAP_BUDGET_MS = Number(process.env.PG_BOOTSTRAP_TIMEOUT_MS || 12000);
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(Object.assign(new Error(`${label} timed out after ${ms}ms`), { code: 'ETIMEDOUT' }));
+    }, ms);
+    timer.unref?.();
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
 
 // Lazy-loaded pg types & instances
 let pgModule: typeof import('pg') | null = null;
@@ -661,21 +705,32 @@ export class RestaurantStore {
       const parseError = pgUrlParseError(pgUrl);
       if (parseError) throw Object.assign(new Error(parseError), { code: 'INVALID_DATABASE_URL' });
       this.pgPhase = 'ssl-probe';
-      await this.ensurePostgresSchema();
-      this.pgPhase = 'seed';
-      const settings = await this.getSettingsInternal();
-      if (!settings) await this.putSettingsInternal(initialSettings);
-      await this.seedMissing('categories', initialCategories);
-      await this.seedMissing('tables', initialTables);
-      await this.seedMissing('products', initialProducts);
-      // Carry over anything recorded locally while the database was down, so
-      // orders/feedback never vanish at the moment the connection heals.
-      await this.migrateLocalRecordsToPostgres();
-      this.pgPhase = 'counter';
-      await this.ensureCounter();
-      // If the store already issued order numbers from the local file, make
-      // sure the database counter never hands out a duplicate.
-      await this.raisePgCounterToLocalMax();
+      // One overall deadline for the whole bootstrap. An unreachable database
+      // fails slowly (TCP timeouts), and without this cap the very first
+      // request to a cold serverless instance hung until the platform killed
+      // it — the visitor saw a 504 instead of the app falling back to the
+      // local snapshot and rendering normally.
+      await withTimeout(
+        (async () => {
+          await this.ensurePostgresSchema();
+          this.pgPhase = 'seed';
+          const settings = await this.getSettingsInternal();
+          if (!settings) await this.putSettingsInternal(initialSettings);
+          await this.seedMissing('categories', initialCategories);
+          await this.seedMissing('tables', initialTables);
+          await this.seedMissing('products', initialProducts);
+          // Carry over anything recorded locally while the database was down, so
+          // orders/feedback never vanish at the moment the connection heals.
+          await this.migrateLocalRecordsToPostgres();
+          this.pgPhase = 'counter';
+          await this.ensureCounter();
+          // If the store already issued order numbers from the local file, make
+          // sure the database counter never hands out a duplicate.
+          await this.raisePgCounterToLocalMax();
+        })(),
+        PG_BOOTSTRAP_BUDGET_MS,
+        'Postgres bootstrap'
+      );
       this.usePostgres = true;
       this.pgError = null;
       console.log('[store] Persistence: direct Postgres (DATABASE_URL).');
