@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { CafeTable, CafeSettings, Order } from '../types';
 import { api } from '../services/api';
+import { useVisiblePolling } from '../utils/usePolling';
 import { getMyDeviceOrderIds, getSubmittedFeedbackForOrder } from '../utils/deviceOrders';
 import { formatOrderDateTime } from '../utils/datetime';
 
@@ -103,11 +104,12 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
     fetchHistory();
     // Keep statuses live while the customer has the list open, without any
     // manual refresh. Polling stops the moment the modal closes.
-    const interval = window.setInterval(() => {
-      fetchHistory({ silent: true });
-    }, 5000);
-    return () => window.clearInterval(interval);
   }, [isOpen, table?.token, fetchHistory]);
+
+  // Customer-facing order tracking. Polls only while the modal is actually
+  // open AND the tab is visible — a phone left on the table with the screen
+  // off no longer streams requests.
+  useVisiblePolling(() => fetchHistory({ silent: true }), 8000, isOpen && Boolean(table));
 
   if (!isOpen) return null;
 

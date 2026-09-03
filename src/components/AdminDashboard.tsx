@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Order, Product, CafeTable, CafeCategory, CafeSettings, WaiterCall } from '../types';
 import { api, BackendHealth } from '../services/api';
+import { useVisiblePolling } from '../utils/usePolling';
 import { AdminOrders } from './AdminOrders';
 import { AdminProducts } from './AdminProducts';
 import { AdminTables } from './AdminTables';
@@ -314,26 +315,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     //   - live kitchen feed (orders + waiter calls): every 5 seconds
     //   - menu / tables / settings reference data:   every 30 seconds
     //   - backend storage health:                    every 60 seconds
-    const liveInterval = window.setInterval(() => {
-      fetchLiveData();
-    }, 5_000);
-
-    const referenceInterval = window.setInterval(() => {
-      fetchReferenceData(false);
-    }, 30_000);
-
-    const healthInterval = window.setInterval(refreshBackendHealth, 60_000);
-
+    // The timers themselves live in useVisiblePolling below, so a dashboard
+    // left open on a backgrounded tab stops generating traffic entirely.
     return () => {
-      window.clearInterval(liveInterval);
-      window.clearInterval(referenceInterval);
-      window.clearInterval(healthInterval);
       window.removeEventListener('pointerdown', warmAudio);
       window.removeEventListener('keydown', warmAudio);
       stopSpokenAlerts();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Live kitchen feed: orders + waiter calls. This is the hot path — kept at 5s
+  // for responsiveness, but now paused whenever the tab is hidden and given an
+  // instant catch-up fetch on refocus.
+  useVisiblePolling(() => fetchLiveData(), 5_000);
+  // Reference data (menu, tables, categories, settings) changes rarely.
+  useVisiblePolling(() => fetchReferenceData(false), 30_000);
+  // Storage health is a diagnostic banner; once a minute is plenty.
+  useVisiblePolling(() => refreshBackendHealth(), 60_000);
 
   const newOrdersCount = orders.filter((order) => order.status === 'new').length;
   const pendingCallsCount = waiterCalls.filter((call) => call.status === 'pending').length;

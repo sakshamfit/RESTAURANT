@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Bell, CheckCircle2, Clock, RefreshCw } from 'lucide-react';
 import { WaiterCall } from '../types';
 import { api } from '../services/api';
+import { useVisiblePolling } from '../utils/usePolling';
 
 interface AdminWaiterCallsProps {
   onRefreshParent?: () => void;
@@ -27,11 +28,12 @@ export const AdminWaiterCalls: React.FC<AdminWaiterCallsProps> = ({ onRefreshPar
 
   useEffect(() => {
     fetchCalls(true);
-    const interval = setInterval(() => {
-      fetchCalls(false);
-    }, 4000);
-    return () => clearInterval(interval);
   }, []);
+
+  // 4s → 10s, and paused while the tab is hidden. Waiter calls are already
+  // announced by the dashboard's own live feed, so this list does not need a
+  // sub-5-second cadence of its own.
+  useVisiblePolling(() => fetchCalls(false), 10_000);
 
   const handleAttend = async (id: string) => {
     try {

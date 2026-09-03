@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Star, MessageSquare, RefreshCw, Sparkles, User, MapPin, Award, ThumbsUp } from 'lucide-react';
 import { CustomerFeedback } from '../types';
 import { api } from '../services/api';
+import { useVisiblePolling } from '../utils/usePolling';
 
 export const AdminFeedbacks: React.FC = () => {
   const [feedbacks, setFeedbacks] = useState<CustomerFeedback[]>([]);
@@ -47,14 +48,10 @@ export const AdminFeedbacks: React.FC = () => {
   useEffect(() => {
     fetchFeedbacks(true);
 
-    const interval = setInterval(() => {
-      fetchFeedbacks(false);
-    }, 6000);
-
-    return () => {
-      clearInterval(interval);
-    };
   }, []);
+
+  // Feedback is not time-critical: 6s → 60s, paused while the tab is hidden.
+  useVisiblePolling(() => fetchFeedbacks(false), 60_000);
 
   const displayedFeedbacks = filterRating === 'all'
     ? feedbacks
