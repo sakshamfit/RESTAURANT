@@ -40,6 +40,7 @@ import {
   type LicenseStatus,
 } from './license.js';
 import { auditMiddleware } from './audit.js';
+import { registerBackupRoutes } from './backupRoutes.js';
 import { buildLanUrls, getBestBaseUrl, getLanAddresses } from './network.js';
 
 dotenv.config();
@@ -1236,6 +1237,12 @@ export function createApp() {
       .filter(Boolean);
     res.json({ entries });
   }));
+
+  // Backup + disaster-recovery routes (local .rdbak engine, customer-owned cloud
+  // copies, restore/import). Registered before the global error responder below so
+  // its own errors arrive as clean JSON, and it reuses the existing requireAdmin
+  // guard (license → session → audit) rather than defining auth of its own.
+  registerBackupRoutes(app, { asyncRoute, jsonError, requireAdmin });
 
   // ── Global JSON error responder ────────────────────────────────────────────
   // Final safety net for every route (see asyncRoute): a storage hiccup or an

@@ -438,6 +438,57 @@ ipcMain.handle('desktop:open-data-folder', async () => {
   return shell.openPath(dataDir());
 });
 
+// Backups folder chooser (Backup Center → "Change folder"). Only ever a real
+// native dialog: the sandboxed renderer cannot browse the disk, and the server
+// additionally refuses any path that does not already exist — so a typo or a
+// dismissed dialog can never silently move backups somewhere invented.
+ipcMain.handle('desktop:pick-backup-folder', async () => {
+  const win = BrowserWindow.getFocusedWindow() || mainWindow;
+  const options = {
+    title: 'Choose where backup files are stored',
+    buttonLabel: 'Use this folder',
+    properties: ['openDirectory', 'createDirectory'],
+  };
+  if (win) options.browserWindow = win;
+  let result;
+  try {
+    result = await dialog.showOpenDialog(options);
+  } catch (error) {
+    return { ok: false, message: `The folder dialog could not be opened: ${error?.message || error}` };
+  }
+  const chosen = result && !result.canceled ? result.filePaths?.[0] : '';
+  if (!chosen) return { ok: false, cancelled: true, message: 'No folder was chosen, so backups stay where they are.' };
+  try {
+    // A folder inside the installation tree is replaced by every app update (and
+    // deleted by an uninstall) — precisely the failure a backup must survive.
+    const installRoot = path.resolve(path.dirname(process.execPath));
+    const resolved = path.resolve(chosen);
+    if (resolved === installRoot || resolved.startsWith(installRoot + path.sep)) {
+      return {
+        ok: false,
+        message: 'Backups cannot live inside the app folder, because updates replace it. Choose a folder in Documents or on another drive instead.',
+      };
+    }
+  } catch {
+    /* the guard is best-effort; the server still validates the path itself */
+  }
+  return { ok: true, path: chosen };
+});
+
+// Reveals the backup folder the server already reported (used by
+// "Open backup folder" in the Recovery tab). Never creates or resolves anything.
+ipcMain.handle('desktop:reveal-backup-folder', async (_event, target) => {
+  const dir = typeof target === 'string' ? target.trim() : '';
+  if (!dir || !path.isAbsolute(dir)) return { ok: false, message: 'No custom backup folder is set yet.' };
+  let openError = '';
+  try {
+    openError = await shell.openPath(dir);
+  } catch (error) {
+    return { ok: false, message: error?.message || 'The folder could not be opened.' };
+  }
+  return openError ? { ok: false, message: openError } : { ok: true };
+});
+
 ipcMain.handle('desktop:machine-fingerprint', () => getMachineFingerprint());
 
 // ── Auto-update ────────────────────────────────────────────────────────────

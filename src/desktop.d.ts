@@ -22,6 +22,14 @@ export interface NagoriDesktopBridge {
   getInfo: () => Promise<NagoriDesktopInfo>;
   /** Opens the folder holding this machine's local orders/menu data. */
   openDataFolder: () => Promise<string>;
+  /**
+   * Native "choose a folder" dialog for the Backup Center. `cancelled` is true
+   * when the owner dismissed it (which is not an error); `message` carries the
+   * reason a folder was refused, phrased for the owner.
+   */
+  pickBackupFolder: () => Promise<{ ok: boolean; path?: string; cancelled?: boolean; message?: string }>;
+  /** Reveals a backup folder the server already reported. */
+  revealBackupFolder: (dir: string) => Promise<{ ok: boolean; message?: string }>;
   /** Stable per-machine identifier used to bind a license. */
   getMachineFingerprint: () => Promise<string>;
   /**
