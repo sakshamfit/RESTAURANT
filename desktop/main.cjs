@@ -84,12 +84,23 @@ function getLanAddresses() {
     for (const info of interfaces[name] || []) {
       if (info.family !== 'IPv4' || info.internal) continue;
       if (seen.has(info.address)) continue;
+      // Skip link-local 169.254 unless no other option
+      const isLinkLocal = info.address.startsWith('169.254.');
       seen.add(info.address);
-      // Heuristic: physical / Wi-Fi adapters come first on every desktop OS we
-      // support, virtual adapters (Docker, WSL, VPNs, virtual hosts) come last.
-      const isVirtual = /virtual|vmware|hyper-v|hyperv|docker|wsl|veth|tunnel|utun|tap|tun|loopback|pseudo/i.test(name);
-      if (isVirtual) out.push({ address: info.address, interface: name, priority: 1 });
-      else out.push({ address: info.address, interface: name, priority: 0 });
+      const isVirtual = /virtual|vmware|hyper-v|hyperv|docker|wsl|veth|tunnel|tap|tun|loopback|pseudo|bridge|br-/i.test(name);
+      // On macOS, utun is VPN but also sometimes used; treat as virtual unless it's the only
+      const isUtun = /^utun\d+$/i.test(name);
+      let rangePriority = 10;
+      if (info.address.startsWith('192.168.')) rangePriority = 0;
+      else if (info.address.startsWith('10.')) rangePriority = 1;
+      else if (/^172\.(1[6-9]|2\d|3[01])\./.test(info.address)) rangePriority = 2;
+      else if (isLinkLocal) rangePriority = 100;
+
+      let priority = rangePriority + (isVirtual ? 50 : 0) + (isUtun ? 60 : 0) + (isLinkLocal ? 100 : 0);
+      // Prefer en0, eth0, wlan0, Wi-Fi
+      if (/^(en0|eth0|wlan0|wi-fi|wifi|wlp)/i.test(name)) priority -= 5;
+
+      out.push({ address: info.address, interface: name, priority });
     }
   }
   out.sort((a, b) => a.priority - b.priority);
@@ -184,12 +195,12 @@ function spawnServer(port) {
       PORT: String(port),
       DIST_DIR: distDir(),
       DATA_DIR: dataDir(),
-      APP_URL: `http://127.0.0.1:${port}`,
-      // Tells the server it's running inside the packaged desktop app, so
-      // /api/health reports isDesktop=true and the staff console hides the
-      // "set DATABASE_URL in Vercel" tip. DESKTOP_LAN_URLS carries the JSON
-      // list of LAN addresses the server is also listening on, so the QR
-      // codes point at a URL a customer's phone can reach.
+      // DO NOT set APP_URL to loopback — that would make QR codes point at
+      // 127.0.0.1 which phones cannot open. Let the server auto-detect LAN
+      // from DESKTOP_LAN_URLS or os.networkInterfaces(). If user configured
+      // a custom public URL via settings.qrBaseUrl, the server will use that.
+      // If they really need a public URL via env, they can set PUBLIC_URL
+      // externally and it will be respected.
       DESKTOP_APP: '1',
       DESKTOP_LAN_URLS: JSON.stringify(buildLanUrls(port)),
     },

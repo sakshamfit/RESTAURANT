@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import os from 'os';
 import dotenv from 'dotenv';
 // Explicit .js specifiers so this file also runs correctly as native ESM
 // ("type": "module") after a plain tsc/esbuild transpile without bundling.
@@ -28,20 +29,18 @@ async function startServer() {
   await initAdminAuth();
   await store.waitUntilReady();
   if (process.env.NODE_ENV !== 'production') {
-    // Imported lazily so a production bundle (web host or packaged desktop app)
-    // never needs Vite installed.
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        allowedHosts: ['.e2b.app', 'localhost'],
+        // Allow LAN IPs, preview domains, ngrok, etc — otherwise phones
+        // scanning QR codes get blocked by Vite's host check.
+        allowedHosts: true,
       },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    // DIST_DIR lets the packaged desktop app point at its bundled assets;
-    // everywhere else the Vite build sits next to the server in ./dist.
     const distPath = process.env.DIST_DIR
       ? path.resolve(process.env.DIST_DIR)
       : path.join(process.cwd(), 'dist');
@@ -56,6 +55,26 @@ async function startServer() {
     } else {
       console.log('Persistence: local file data/restaurant.json. No cloud services used.');
     }
+    // Show LAN URLs so staff knows which URL to print on QR codes
+    try {
+      const nets = os.networkInterfaces();
+      const ips: { iface: string; addr: string }[] = [];
+      for (const name of Object.keys(nets)) {
+        for (const net of nets[name] || []) {
+          if ((net as any).family === 'IPv4' && !(net as any).internal) ips.push({ iface: name, addr: (net as any).address });
+        }
+      }
+      if (ips.length > 0) {
+        console.log(`LAN addresses for QR codes (phones must be on same Wi-Fi):`);
+        ips.forEach(({ iface, addr }) => console.log(`  - ${iface}: ${addr} => http://${addr}:${PORT}`));
+        console.log(`If QR still shows 127.0.0.1, set APP_URL env or qrBaseUrl in Admin Settings to your LAN URL.`);
+      } else {
+        console.log('No LAN IPv4 detected — connect this machine to Wi-Fi/Ethernet for QR codes to work on phones.');
+      }
+      if (process.env.APP_URL) {
+        console.log(`APP_URL override active: ${process.env.APP_URL} — QR codes will use this.`);
+      }
+    } catch {}
   });
 }
 

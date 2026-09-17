@@ -1,7 +1,7 @@
 {
   "name": "nexoraosp-restaurant-desktop",
   "productName": "NEXORAOSP RESTAURANT",
-  "version": "1.0.1",
+  "version": "1.0.0",
   "private": true,
   "description": "NEXORAOSP RESTAURANT desktop staff console: the restaurant's order server and admin dashboard in one installable app, with all data stored on this machine.",
   "main": "main.cjs",
