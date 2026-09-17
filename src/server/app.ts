@@ -40,6 +40,7 @@ import {
   type LicenseStatus,
 } from './license.js';
 import { auditMiddleware } from './audit.js';
+import { buildLanUrls, getBestBaseUrl, getLanAddresses } from './network.js';
 
 dotenv.config();
 
@@ -356,26 +357,65 @@ export function createApp() {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-  app.get('/api/health', asyncRoute(async (_req, res) => {
+  app.get('/api/health', asyncRoute(async (req, res) => {
     const diagnostics = store.getDiagnostics();
     res.set('Cache-Control', 'no-store');
     const licenseRequired = isLicenseRequired();
     let licenseState: LicenseStatus | null = null;
     if (licenseRequired) {
-      // Best-effort: never let a license hiccup fail the health
-      // endpoint. The renderer treats `licenseRequired: true` +
-      // missing `license` as "wizard must run" and shows the
-      // setup flow.
       try {
         licenseState = await verifyLicense();
       } catch {
         licenseState = { state: 'invalid', reason: 'license check failed' };
       }
     }
+
+    // Network info: LAN IPs that customer phones can reach.
+    const port = Number(process.env.PORT || (req.socket as any).localPort || 3000);
+    let lanUrls: Array<{ url: string; address: string; interface: string }> = [];
+    let localUrl: string | null = null;
+    let bestBase: { baseUrl: string; source: string } | null = null;
+    try {
+      const origin = `${req.protocol}://${req.get('host')}`;
+      const best = getBestBaseUrl({
+        port,
+        requestOrigin: origin,
+        appUrlEnv: process.env.APP_URL || process.env.PUBLIC_URL,
+        desktopLanUrlsEnv: process.env.DESKTOP_LAN_URLS,
+      });
+      bestBase = { baseUrl: best.baseUrl, source: best.source };
+      lanUrls = best.lanUrls;
+      localUrl = `http://127.0.0.1:${port}`;
+      if (process.env.DESKTOP_LAN_URLS) {
+        try {
+          const parsed = JSON.parse(process.env.DESKTOP_LAN_URLS);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            lanUrls = parsed;
+          }
+        } catch {}
+      } else if (lanUrls.length === 0) {
+        lanUrls = buildLanUrls(port);
+      }
+    } catch {
+      try {
+        lanUrls = buildLanUrls(port);
+      } catch {
+        lanUrls = [];
+      }
+    }
+
+    try {
+      const settings = await store.getSettings();
+      const customQrBase = (settings as any).qrBaseUrl || (settings as any).publicBaseUrl || '';
+      if (customQrBase && typeof customQrBase === 'string' && customQrBase.trim()) {
+        const cleaned = customQrBase.trim().replace(/\/$/, '');
+        bestBase = { baseUrl: cleaned, source: 'settings.qrBaseUrl' };
+      }
+    } catch {}
+
     res.json({
       status: 'ok',
       app: 'NEXORAOSP RESTAURANT API',
-      // Commit that produced this deploy, when running on Vercel.
       deploySha: process.env.VERCEL_GIT_COMMIT_SHA || null,
       persistence: diagnostics.provider,
       postgresConfigured: diagnostics.postgresConfigured,
@@ -391,20 +431,71 @@ export function createApp() {
         : undefined,
       dataFile: diagnostics.dataFile,
       ephemeral: diagnostics.ephemeral,
-      // License gate. Only present in distributed builds; the
-      // renderer treats `licenseRequired: false` as "self-hosted,
-      // no gate".
       licenseRequired,
       ...(licenseState ? { license: licenseState } : {}),
       trialDays: licenseRequired ? getTrialDays() : undefined,
       trialAvailable: licenseRequired && getTrialDays() > 0,
-      // Ops helpers: a very low uptime together with "connected" on every check
-      // means requests keep landing on fresh cold starts; VERCEL_REGION shows
-      // which datacenter served the request.
       nodeUptimeSeconds: Math.round(process.uptime()),
       region: process.env.VERCEL_REGION || null,
       timestamp: new Date().toISOString(),
+      isDesktop: !!process.env.DESKTOP_APP,
+      localUrl,
+      lanUrls,
+      qrBaseUrl: bestBase?.baseUrl || null,
+      qrBaseSource: bestBase?.source || null,
+      port,
+      host: process.env.HOST || '0.0.0.0',
     });
+  }));
+
+  // Dedicated network info endpoint — used by QR modal to always get a LAN URL
+  app.get('/api/network', asyncRoute(async (req, res) => {
+    const port = Number(process.env.PORT || (req.socket as any).localPort || 3000);
+    const origin = `${req.protocol}://${req.get('host')}`;
+    const best = getBestBaseUrl({
+      port,
+      requestOrigin: origin,
+      appUrlEnv: process.env.APP_URL || process.env.PUBLIC_URL,
+      desktopLanUrlsEnv: process.env.DESKTOP_LAN_URLS,
+    });
+
+    let lanUrls = best.lanUrls;
+    try {
+      if (process.env.DESKTOP_LAN_URLS) {
+        const parsed = JSON.parse(process.env.DESKTOP_LAN_URLS);
+        if (Array.isArray(parsed) && parsed.length > 0) lanUrls = parsed;
+      }
+    } catch {}
+    if (lanUrls.length === 0) {
+      try {
+        lanUrls = buildLanUrls(port);
+      } catch {
+        lanUrls = [];
+      }
+    }
+
+    let customBase: string | null = null;
+    try {
+      const settings = await store.getSettings();
+      const raw = (settings as any).qrBaseUrl || (settings as any).publicBaseUrl || '';
+      if (raw && typeof raw === 'string' && raw.trim()) customBase = raw.trim().replace(/\/$/, '');
+    } catch {}
+
+    res.json({
+      port,
+      host: process.env.HOST || '0.0.0.0',
+      localUrl: `http://127.0.0.1:${port}`,
+      lanUrls,
+      bestBaseUrl: customBase || best.baseUrl,
+      baseSource: customBase ? 'settings.qrBaseUrl' : best.source,
+      customBaseUrl: customBase,
+      requestOrigin: origin,
+      addresses: getLanAddresses(),
+    });
+  }));
+
+  app.get('/api/server-info', asyncRoute(async (req, res) => {
+    res.redirect('/api/network');
   }));
 
   // ----------------------------------------------------

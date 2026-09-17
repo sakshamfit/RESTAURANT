@@ -125,6 +125,10 @@ export interface CafeSettings {
   whatsappApiUrl?: string;
   whatsappApiToken?: string;
   enableSoundAlerts: boolean;
+  /** Optional override for QR codes: e.g. https://mycafe.com or http://192.168.1.42:3000 */
+  qrBaseUrl?: string;
+  /** Alias for qrBaseUrl, for backwards compat */
+  publicBaseUrl?: string;
 }
 
 export interface SalesSummary {

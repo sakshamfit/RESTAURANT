@@ -318,6 +318,35 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({
           </div>
         </div>
 
+        {/* QR Base URL — critical for fixing 127.0.0.1 QR issue */}
+        <div className="pt-4 border-t border-stone-100 space-y-4">
+          <div>
+            <h3 className="font-bold text-sm text-stone-900 flex items-center gap-2">
+              <Settings className="w-4 h-4 text-sky-600" />
+              <span>QR Code Base URL (Fix for 127.0.0.1 / Safari can't connect)</span>
+            </h3>
+            <p className="text-xs text-stone-500">
+              The URL encoded in table QR codes. Leave empty for auto-detect (uses LAN IP). Set to <code className="bg-stone-100 px-1 rounded">http://YOUR_LAN_IP:PORT</code> if QR still shows 127.0.0.1.
+              Must be reachable from customer phones on same Wi-Fi. Example: <code className="bg-stone-100 px-1 rounded">http://192.168.1.42:3000</code> or <code className="bg-stone-100 px-1 rounded">https://your-ngrok-url.ngrok.io</code>
+            </p>
+          </div>
+          <div>
+            <label className="block text-xs font-bold text-stone-700 mb-1">
+              Custom QR Base URL (optional, overrides auto-detect)
+            </label>
+            <input
+              type="text"
+              placeholder="e.g. http://192.168.1.42:3000  or  https://mycafe.com"
+              value={(formData as any).qrBaseUrl || (formData as any).publicBaseUrl || ''}
+              onChange={(e) => setFormData({ ...formData, qrBaseUrl: e.target.value } as any)}
+              className="w-full px-3.5 py-2 bg-stone-50 border border-stone-200 rounded-xl text-xs font-mono font-medium text-stone-900 focus:bg-white focus:ring-2 focus:ring-sky-500"
+            />
+            <p className="text-[11px] text-stone-500 mt-1">
+              If you set this, ALL table QR codes will use it. Leave empty to auto-use server LAN IP. For local testing, find your LAN IP via <code className="bg-stone-100 px-1 rounded">ipconfig</code> (Windows) or <code className="bg-stone-100 px-1 rounded">ifconfig | grep 192.168</code> (Mac/Linux).
+            </p>
+          </div>
+        </div>
+
         {/* WhatsApp Notification Integration Section */}
         <div className="pt-4 border-t border-stone-100 space-y-4">
           <div className="flex items-center justify-between">

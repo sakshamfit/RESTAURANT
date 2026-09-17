@@ -74,20 +74,62 @@ function openBrowser(url) {
   }
 }
 
-function printUrl(port) {
+function getLanAddresses() {
+  const interfaces = os.networkInterfaces();
+  const out = [];
+  const seen = new Set();
+  for (const name of Object.keys(interfaces)) {
+    for (const info of interfaces[name] || []) {
+      if (info.family !== 'IPv4' || info.internal) continue;
+      if (seen.has(info.address)) continue;
+      seen.add(info.address);
+      const isVirtual = /virtual|vmware|hyper-v|hyperv|docker|wsl|veth|tunnel|tap|tun|loopback|pseudo|bridge|br-/i.test(name);
+      const isUtun = /^utun\d+$/i.test(name);
+      let rangePriority = 10;
+      if (info.address.startsWith('192.168.')) rangePriority = 0;
+      else if (info.address.startsWith('10.')) rangePriority = 1;
+      else if (/^172\.(1[6-9]|2\d|3[01])\./.test(info.address)) rangePriority = 2;
+      else if (info.address.startsWith('169.254.')) rangePriority = 100;
+      let priority = rangePriority + (isVirtual ? 50 : 0) + (isUtun ? 60 : 0);
+      if (/^(en0|eth0|wlan0|wi-fi|wifi|wlp)/i.test(name)) priority -= 5;
+      out.push({ address: info.address, interface: name, priority });
+    }
+  }
+  out.sort((a, b) => a.priority - b.priority);
+  return out;
+}
+
+function buildLanUrls(port) {
+  return getLanAddresses().map((entry) => ({
+    url: `http://${entry.address}:${port}`,
+    address: entry.address,
+    interface: entry.interface,
+  }));
+}
+
+function printUrl(port, lanUrls) {
+  const primary = lanUrls[0]?.url || `http://127.0.0.1:${port}`;
   console.log(`
-  ${APP_NAME} — Staff Console
+  ${APP_NAME} — Staff Console (QR FIXED)
   ─────────────────────────────────────────────────
-  Open:  http://127.0.0.1:${port}/admin
+  Admin:  http://127.0.0.1:${port}/admin  (this PC)
+  LAN:    ${primary}/admin  (for phones on same Wi-Fi)
+  ${lanUrls.length > 1 ? `Other:  ${lanUrls.slice(1).map(u=>u.url).join(', ')}` : ''}
   Data:  ${DATA_DIR}
+  QR:     QR codes now use LAN IP (${primary}) not 127.0.0.1
   ─────────────────────────────────────────────────
   Keep this window open while the app is in use.
   Press Ctrl+C to stop the app.`);
+  if (lanUrls.length === 0) {
+    console.log(`\n  ⚠ No LAN IP detected! QR will show 127.0.0.1 and phones can't open it.`);
+    console.log(`  Connect to Wi-Fi and restart, or set APP_URL env to your LAN IP.`);
+  }
 }
 
 (async () => {
   const port = await reservePort();
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  const lanUrls = buildLanUrls(port);
 
   const child = fork(SERVER_ENTRY, [], {
     cwd: RESOURCES,
@@ -95,11 +137,12 @@ function printUrl(port) {
     env: {
       ...process.env,
       NODE_ENV: 'production',
-      HOST: '127.0.0.1',
+      HOST: '0.0.0.0',
       PORT: String(port),
       DIST_DIR,
       DATA_DIR,
-      APP_URL: `http://127.0.0.1:${port}`,
+      DESKTOP_APP: '1',
+      DESKTOP_LAN_URLS: JSON.stringify(lanUrls),
     },
   });
 

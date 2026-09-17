@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { Plus, QrCode, Printer, ExternalLink, Power, Trash2, RefreshCw, AlertCircle, Coffee } from 'lucide-react';
+import { Plus, QrCode, ExternalLink, Power, Trash2, RefreshCw, AlertCircle, Wifi } from 'lucide-react';
 import { CafeTable, Order, CafeSettings } from '../types';
 import { api } from '../services/api';
 import { QRPrintModal } from './QRPrintModal';
 import type { NagoriDesktopInfo } from '../desktop';
+import { fetchNetworkInfo, pickBestQrBaseUrl, buildOrderUrl, type NetworkInfo } from '../utils/qrBaseUrl';
 
 interface AdminTablesProps {
   tables: (CafeTable & { activeOrder?: Order | null })[];
@@ -22,25 +23,58 @@ export const AdminTables: React.FC<AdminTablesProps> = ({
   const [newTableName, setNewTableName] = useState<string>(`Table ${tables.length + 1}`);
   const [saving, setSaving] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
-  // On the desktop app, "Open Menu" must point at the staff machine's LAN
-  // address — a customer phone on the same Wi-Fi can reach that, while the
-  // staff window's loopback URL is invisible to other devices.
   const [desktopInfo, setDesktopInfo] = useState<NagoriDesktopInfo | null>(null);
+  const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
+  const [qrBaseDisplay, setQrBaseDisplay] = useState<{ baseUrl: string; source: string; isLoopback: boolean } | null>(null);
+
   useEffect(() => {
-    if (!window.nagoriDesktop?.isDesktop) return;
-    window.nagoriDesktop
-      .getInfo()
-      .then((info) => setDesktopInfo(info))
-      .catch(() => setDesktopInfo(null));
+    let cancelled = false;
+    const load = async () => {
+      if (window.nagoriDesktop?.isDesktop) {
+        try {
+          const info = await window.nagoriDesktop.getInfo();
+          if (!cancelled) setDesktopInfo(info);
+        } catch {
+          if (!cancelled) setDesktopInfo(null);
+        }
+      }
+      try {
+        const net = await fetchNetworkInfo();
+        if (!cancelled) setNetworkInfo(net);
+      } catch {
+        if (!cancelled) setNetworkInfo(null);
+      }
+    };
+    load();
+    return () => { cancelled = true; };
   }, []);
 
+  // Compute best base for display
+  useEffect(() => {
+    const settingsQrBase = (settings as any).qrBaseUrl || (settings as any).publicBaseUrl || '';
+    const desktopLanUrl = desktopInfo?.lanUrls?.[0]?.url || undefined;
+    const desktopLocalUrl = desktopInfo?.localUrl || undefined;
+    const picked = pickBestQrBaseUrl({
+      settingsQrBaseUrl: settingsQrBase,
+      desktopLanUrl,
+      desktopLocalUrl,
+      networkInfo,
+      windowOrigin: typeof window !== 'undefined' ? window.location.origin : undefined,
+    });
+    setQrBaseDisplay(picked);
+  }, [desktopInfo, networkInfo, settings]);
+
   const customerMenuUrl = (token: string): string => {
-    if (desktopInfo) {
-      const lan = desktopInfo.lanUrls?.[0]?.url;
-      if (lan) return `${lan}/order/${token}`;
-      return `${desktopInfo.localUrl || ''}/order/${token}`;
-    }
-    return `/order/${token}`;
+    const settingsQrBase = (settings as any).qrBaseUrl || (settings as any).publicBaseUrl || '';
+    const desktopLanUrl = desktopInfo?.lanUrls?.[0]?.url || undefined;
+    const picked = pickBestQrBaseUrl({
+      settingsQrBaseUrl: settingsQrBase,
+      desktopLanUrl,
+      desktopLocalUrl: desktopInfo?.localUrl || undefined,
+      networkInfo,
+      windowOrigin: typeof window !== 'undefined' ? window.location.origin : undefined,
+    });
+    return buildOrderUrl(picked.baseUrl, token);
   };
 
   const handleAddTable = async (e: React.FormEvent) => {
@@ -111,6 +145,20 @@ export const AdminTables: React.FC<AdminTablesProps> = ({
           <p className="text-xs text-stone-500">
             Each table has a permanent QR token. Changing menu items or prices never changes these QR codes.
           </p>
+          {qrBaseDisplay && (
+            <div className={`mt-2 p-2 rounded-xl border text-[11px] flex items-start gap-2 ${qrBaseDisplay.isLoopback ? 'bg-red-50 border-red-200 text-red-800' : 'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
+              <Wifi className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+              <div>
+                <span className="font-bold">QR Base URL:</span> <code className="font-mono font-bold break-all">{qrBaseDisplay.baseUrl}</code>
+                <span className="ml-2 text-[10px] opacity-70">({qrBaseDisplay.source})</span>
+                {qrBaseDisplay.isLoopback ? (
+                  <span className="block mt-1 font-semibold">⚠ Loopback detected — phones will show "Safari could not connect to server". Set APP_URL or QR Base URL in Settings to your LAN IP.</span>
+                ) : (
+                  <span className="block mt-1">✓ Phones on same Wi-Fi can open this.</span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         <button
@@ -162,7 +210,6 @@ export const AdminTables: React.FC<AdminTablesProps> = ({
                     </div>
                   </div>
 
-                  {/* Status Toggle */}
                   <button
                     onClick={() => handleToggleActive(table.id)}
                     title={table.isActive ? 'Table is Active (Click to disable)' : 'Table is Disabled (Click to activate)'}
@@ -176,7 +223,6 @@ export const AdminTables: React.FC<AdminTablesProps> = ({
                   </button>
                 </div>
 
-                {/* Active Order Banner */}
                 {hasActiveOrder && table.activeOrder && (
                   <div className="mb-3 p-2.5 bg-amber-50 rounded-xl border border-amber-200 text-xs text-amber-900 flex items-center justify-between">
                     <div>
@@ -192,7 +238,6 @@ export const AdminTables: React.FC<AdminTablesProps> = ({
                 )}
               </div>
 
-              {/* Table Action Buttons */}
               <div className="pt-3 border-t border-stone-100 flex flex-col gap-2">
                 <div className="grid grid-cols-2 gap-2">
                   <button
@@ -238,7 +283,6 @@ export const AdminTables: React.FC<AdminTablesProps> = ({
         })}
       </div>
 
-      {/* Add Table Modal */}
       {isAddModalOpen && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-stone-950/70 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white w-full max-w-sm rounded-3xl shadow-2xl overflow-hidden border border-stone-100">
@@ -307,7 +351,6 @@ export const AdminTables: React.FC<AdminTablesProps> = ({
         </div>
       )}
 
-      {/* QR Code Standee Print Modal */}
       {selectedTableForQR && (
         <QRPrintModal
           table={selectedTableForQR}
