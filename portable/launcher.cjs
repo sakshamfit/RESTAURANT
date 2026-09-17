@@ -107,7 +107,7 @@ function buildLanUrls(port) {
   }));
 }
 
-function printUrl(port, lanUrls) {
+function printUrl(port, lanUrls = []) {
   const primary = lanUrls[0]?.url || `http://127.0.0.1:${port}`;
   console.log(`
   ${APP_NAME} — Staff Console (QR FIXED)
@@ -162,7 +162,9 @@ function printUrl(port, lanUrls) {
     process.exit(1);
   }
 
-  printUrl(port);
+  // lanUrls is passed in: without it the address block threw and the launcher
+  // reported a startup failure even though the server was already serving.
+  printUrl(port, lanUrls);
   openBrowser(`http://127.0.0.1:${port}/admin`);
 
   const stop = () => {

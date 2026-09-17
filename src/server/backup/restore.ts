@@ -287,7 +287,7 @@ export async function importBackup(bytes: Buffer, password?: string | null): Pro
  * Recovery tab, so an owner can prove a backup is usable at any time — and the
  * only way a file is ever described as verified in the UI.
  */
-export function verifyBackup(recordId: string, password?: string | null): { ok: true; id: string; file: string; createdAt: string; recordCounts: BackupRecordCounts; encrypted: boolean; message: string } {
+export function verifyBackup(recordId: string, password?: string | null): { ok: true; verified: true; id: string; file: string; createdAt: string; recordCounts: BackupRecordCounts; encrypted: boolean; message: string } {
   const config = loadBackupConfig();
   const dir = effectiveBackupDir(config);
   const entry = listBackups(dir, config).find((record) => record.id === recordId);
@@ -299,6 +299,9 @@ export function verifyBackup(recordId: string, password?: string | null): { ok: 
   if (!validation.ok) throw new BackupError(`This backup did not pass its own checks: ${validation.problems.join(' ')}`, 'validate');
   return {
     ok: true,
+    // `verified` is spelled out because this call only returns when every check
+    // passed (a failure throws), and the Backup Center reads it for the row's tone.
+    verified: true,
     id: entry.id,
     file: entry.file,
     createdAt: payload.header.createdAt,
