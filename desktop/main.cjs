@@ -144,6 +144,32 @@ function getMachineFingerprint() {
 // ── Local server lifecycle ──────────────────────────────────────────────────
 
 /** Reserve an unused TCP port so the server can be started on it. */
+/** True when nobody else holds this exact port on any interface (the server
+ *  binds 0.0.0.0, so the probe has to ask the same way). */
+function portIsFree(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', () => resolve(false));
+    probe.listen(port, '0.0.0.0', () => probe.close(() => resolve(true)));
+  });
+}
+
+/**
+ * The loopback port is deliberately stable. Two things are printed or registered
+ * against it: the table QR codes (a random port would change every restart and
+ * invalidate already-printed codes) and a cloud provider's OAuth redirect address,
+ * which only ever returns to a URI that was registered in advance. So the known
+ * candidates are tried in order and a random free port is the last resort, not the
+ * first choice.
+ */
+async function pickPort(preferredPort) {
+  const candidates = preferredPort ? [preferredPort, ...PORT_CANDIDATES] : PORT_CANDIDATES;
+  for (const candidate of candidates) {
+    if (await portIsFree(candidate)) return candidate;
+  }
+  return reservePort();
+}
+
 function reservePort() {
   return new Promise((resolve, reject) => {
     const probe = net.createServer();
@@ -221,10 +247,12 @@ function spawnServer(port) {
 
 /** Start (or restart) the bundled local server, retrying on a busy port. */
 async function ensureServer(preferredPort) {
-  const attempts = preferredPort ? [preferredPort, ...PORT_CANDIDATES] : PORT_CANDIDATES;
+  // Two tries at most: the stable port, then any free port. Either way the till
+  // starts — a busy candidate must never turn into "the app won't open".
+  const attempts = [await pickPort(preferredPort), 0];
 
   for (let i = 0; i < attempts.length; i += 1) {
-    const port = i === 0 && preferredPort ? preferredPort : await reservePort();
+    const port = attempts[i] || (await reservePort());
     try {
       fs.mkdirSync(dataDir(), { recursive: true });
     } catch {

@@ -192,16 +192,22 @@ The redirect URI for every provider is the app's own address:
 http://<host-the-app-is-opened-on>:<port>/api/cloud/callback
 ```
 
-The app does not ask you for this address: it derives it from the URL you happen to
-have open, so **open the admin console at one of the addresses you registered** (if you
-open it as `http://192.168.1.42:3000` while only `http://localhost:3000/…` is
-registered, the provider will refuse the redirect — add both).
+The app does not ask you for this address — it derives it from the URL you have open,
+and the **Connect** panel shows the exact address to register (select it to copy). It
+must match character for character, so open the admin console at a registered address:
+opening the app as `http://192.168.1.42:3000` while only `http://localhost:3000/…` is
+registered will be refused by the provider — register both if you use both.
 
-* Desktop app: `http://127.0.0.1:38245/api/cloud/callback` — the bundled server uses
-  the first free port of 38245–38250, so register all six (providers accept a list).
-* `npm run dev` / self-hosted node: `http://127.0.0.1:3000/api/cloud/callback` plus
-  your LAN address if the till is reached that way.
-* Hosted: the public origin, e.g. `https://cafe.example.com/api/cloud/callback`.
+| How it runs | Redirect URI to register |
+| --- | --- |
+| Desktop app (Electron) | `http://127.0.0.1:38245/api/cloud/callback` — the bundled server holds that port across restarts (that stability is also what keeps printed table QR codes valid); if something else already owns it, it steps through 38246–38250, so registering all six covers every case |
+| `npm run dev` / self-hosted node | `http://127.0.0.1:3000/api/cloud/callback`, plus the LAN address if staff/phones reach it that way |
+| Hosted (Vercel etc.) | the public origin, e.g. `https://cafe.example.com/api/cloud/callback` |
+
+If the app ever ends up on an unexpected port (every candidate was busy), the panel
+still shows the address it needs — add that one, or use **OneDrive's device-code
+flow**, which has no redirect URI at all: the app displays a code to type at
+`microsoft.com/devicelogin` from any device on any port.
 
 ### Google Drive
 

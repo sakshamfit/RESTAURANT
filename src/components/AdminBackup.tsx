@@ -881,6 +881,14 @@ export const AdminBackup: React.FC<{ onRefresh?: () => void }> = ({ onRefresh })
                 </p>
                 <p className="text-xs text-stone-700">{connect.outcome?.message || connect.begin.instructions}</p>
                 {connect.begin.usesRedirect ? (
+                  <div className="text-[11px] text-stone-600">
+                    <p>Your {connect.begin.label} app must be told to return to exactly this address (select it to copy):</p>
+                    <code className="select-all block mt-1 px-2 py-1.5 rounded-lg bg-white border border-stone-200 font-mono text-[11px] text-stone-800 overflow-wrap-anywhere">
+                      {connect.begin.redirectUri}
+                    </code>
+                  </div>
+                ) : null}
+                {connect.begin.usesRedirect ? (
                   <a
                     href={connect.begin.url}
                     target="_blank"

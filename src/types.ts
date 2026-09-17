@@ -358,6 +358,8 @@ export interface CloudConnectBegin {
   url: string;
   state: string;
   usesRedirect: boolean;
+  /** Register exactly this address in the provider's console. */
+  redirectUri: string;
   deviceCode: { userCode: string; verificationUri: string; expiresIn: number; interval: number } | null;
   instructions: string;
 }

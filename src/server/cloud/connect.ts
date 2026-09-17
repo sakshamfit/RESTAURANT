@@ -46,6 +46,8 @@ export interface BeginConnectOutcome {
   url: string;
   state: string;
   usesRedirect: boolean;
+  /** The address the provider must be told to return to — registered by the owner. */
+  redirectUri: string;
   deviceCode: { userCode: string; verificationUri: string; expiresIn: number; interval: number } | null;
   instructions: string;
 }
@@ -74,6 +76,7 @@ export async function startConnect(
     url: begun.url,
     state: begun.state,
     usesRedirect: begun.usesRedirect,
+    redirectUri,
     deviceCode: begun.deviceCode
       ? {
           userCode: begun.deviceCode.userCode,

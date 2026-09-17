@@ -28,6 +28,26 @@ const DIST_DIR = path.join(RESOURCES, 'dist');
 const DATA_DIR = process.env.NEXORAOSP_DATA_DIR || path.join(os.homedir(), '.nexoraosp-restaurant', 'data');
 const READY_TIMEOUT_MS = 30000;
 const POLL_MS = 250;
+// The loopback port is printed on every table QR code and is the address a cloud
+// provider must be allowed to return to, so it is kept stable across restarts
+// (same list the Electron shell in desktop/main.cjs uses).
+const PORT_CANDIDATES = [38245, 38246, 38247, 38248, 38249, 38250];
+
+function portIsFree(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', () => resolve(false));
+    probe.listen(port, '0.0.0.0', () => probe.close(() => resolve(true)));
+  });
+}
+
+async function pickPort(preferredPort) {
+  const candidates = preferredPort ? [preferredPort, ...PORT_CANDIDATES] : PORT_CANDIDATES;
+  for (const candidate of candidates) {
+    if (await portIsFree(candidate)) return candidate;
+  }
+  return reservePort();
+}
 
 function reservePort() {
   return new Promise((resolve, reject) => {
@@ -127,7 +147,7 @@ function printUrl(port, lanUrls = []) {
 }
 
 (async () => {
-  const port = await reservePort();
+  const port = await pickPort(process.env.NEXORAOSP_PORT ? Number(process.env.NEXORAOSP_PORT) : null);
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const lanUrls = buildLanUrls(port);
 
