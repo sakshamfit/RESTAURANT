@@ -89,7 +89,13 @@ if (stageOnly) {
 }
 
 console.log('→ 4/4  Installing desktop toolchain and running electron-builder');
-if (!existsSync(path.join(desktopDir, 'node_modules', '.bin'))) {
+// electron-builder collects the production dependencies listed in
+// desktop/package.json (electron-updater + its runtime deps, see the
+// `build.files` list). If that tree is missing or only partially installed
+// — a stale node_modules can contain node_modules/.bin but not
+// electron-updater itself — the package step dies with ENOENT. So check for
+// the updater package specifically and reinstall whenever it is absent.
+if (!existsSync(path.join(desktopDir, 'node_modules', 'electron-updater'))) {
   run('npm', ['install', '--no-audit', '--no-fund'], { cwd: desktopDir });
 }
 run('npx', ['electron-builder', ...(flags.length ? flags : [])], { cwd: desktopDir });
