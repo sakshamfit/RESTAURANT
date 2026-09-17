@@ -370,27 +370,6 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-/**
- * Minimal structural guard for a whole-dataset replace. Mirrors the checks in
- * backup.ts (which validates before writing) so a restore that bypassed them
- * still cannot drop half a dataset into the live store.
- */
-function validateSnapshotShape(snapshot: Partial<AppSnapshot> | null): { ok: boolean; problems: string[] } {
-  const problems: string[] = [];
-  if (!snapshot || typeof snapshot !== 'object') return { ok: false, problems: ['snapshot is not an object'] };
-  if (!snapshot.settings || typeof snapshot.settings !== 'object') problems.push('settings missing');
-  for (const key of ['categories', 'tables', 'products', 'orders', 'feedbacks', 'waiterCalls'] as const) {
-    if (!Array.isArray(snapshot[key])) problems.push(`"${key}" is not a list`);
-  }
-  if (Array.isArray(snapshot.orders)) {
-    for (const order of snapshot.orders) if (!order?.id || !Array.isArray(order.items)) problems.push(`order ${String(order?.id)} is incomplete`);
-  }
-  if (Array.isArray(snapshot.tables)) {
-    for (const table of snapshot.tables) if (!table?.id || !table?.token) problems.push(`table ${String(table?.id)} is missing its QR token`);
-  }
-  return { ok: problems.length === 0, problems: problems.slice(0, 20) };
-}
-
 function now() {
   return new Date().toISOString();
 }
@@ -1021,73 +1000,6 @@ export class RestaurantStore {
       this.list('waiterCalls'),
     ]);
     return { settings, categories, tables, products, orders, feedbacks, waiterCalls };
-  }
-
-  private async removeInternal(collection: StoreCollection, id: string) {
-    if (this.usePostgres) {
-      await queryWithRetry(`delete from "${pgTableName(collection)}" where id = $1`, [id]);
-      return;
-    }
-    this.memory[collection] = (this.memory[collection] as unknown as Array<{ id: string }>).filter((item) => item.id !== id) as never;
-  }
-
-  /**
-   * Replace the whole business dataset with `snapshot` — used ONLY by the
-   * backup restore path (see backup.ts), which verifies the snapshot, takes a
-   * verified safety copy of the current data first, and rolls back through this
-   * same method if applying a restore fails.
-   *
-   * It is deliberately built from the existing per-collection primitives rather
-   * than a bulk table swap: a restore must go through the same storage rules as
-   * every other write (Postgres vs local file, atomic JSON flush, order-number
-   * monotonicity), so it can never produce a state the rest of the app cannot
-   * read. Records are written first and only then are the records absent from
-   * the snapshot removed, so an error half-way leaves a superset — recoverable —
-   * instead of an empty restaurant.
-   */
-  async replaceSnapshot(snapshot: AppSnapshot): Promise<void> {
-    await this.ensureReady();
-    if (!snapshot || typeof snapshot !== 'object') throw new Error('replaceSnapshot requires a snapshot object.');
-    const validation = validateSnapshotShape(snapshot);
-    if (!validation.ok) throw new Error(`replaceSnapshot refused invalid data: ${validation.problems.join(' ')}`);
-
-    const collections: StoreCollection[] = ['categories', 'tables', 'products', 'orders', 'feedbacks', 'waiterCalls'];
-    for (const collection of collections) {
-      const incoming = (Array.isArray(snapshot[collection]) ? snapshot[collection] : []) as Array<{ id: string }>;
-      const wanted = new Set(incoming.map((record) => String(record?.id || '')));
-      for (const record of incoming) {
-        if (!record?.id) continue;
-        await this.putInternal(collection, String(record.id), record as never);
-      }
-      const existing = await this.listInternal(collection);
-      for (const record of existing) {
-        if (!wanted.has(String(record.id))) await this.removeInternal(collection, String(record.id));
-      }
-    }
-
-    if (snapshot.settings) await this.putSettingsInternal(snapshot.settings);
-    await this.raiseOrderCounterForRestore(snapshot.orders || []);
-    if (!this.usePostgres) await this.persist();
-  }
-
-  /**
-   * After a restore the next order number must be higher than any number the
-   * restored orders already use, otherwise two orders would share a number and
-   * staff could not tell them apart. `greatest()` keeps it monotonic in both
-   * storage modes and never moves the counter backwards.
-   */
-  private async raiseOrderCounterForRestore(orders: Order[]) {
-    const highest = orders.reduce((max, order) => Math.max(max, orderNumberValue(order)), 0);
-    if (!Number.isFinite(highest) || highest <= 0) return;
-    if (this.usePostgres) {
-      try {
-        await queryWithRetry(`update app_counters set value = greatest(value, $1) where id = 'orders'`, [highest]);
-      } catch (error) {
-        console.warn('[store] Could not sync the order counter after a restore:', (error as Error)?.message || error);
-      }
-      return;
-    }
-    this.memory.counters.orders = Math.max(this.memory.counters.orders || 0, highest);
   }
 
   async nextOrderNumber(): Promise<number> {

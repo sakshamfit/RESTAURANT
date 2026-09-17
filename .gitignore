@@ -11,10 +11,7 @@ coverage/
 data/*.json
 data/*.json.tmp
 data/.license-signing-secret
-data/.credential-entropy
 data/audit.log
-# OS-credential-store fallback: encrypted tokens + the cached backup key
-data/cloud-credentials/
 api/index.cjs
 api/*.map
 api/*.tmp

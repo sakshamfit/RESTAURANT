@@ -14,12 +14,6 @@ contextBridge.exposeInMainWorld('nagoriDesktop', {
   /** Opens the folder that holds this machine's orders/menu database. */
   openDataFolder: () => ipcRenderer.invoke('desktop:open-data-folder'),
   /**
-   * Backup folder picker + reveal (Backup Center). The main process owns the
-   * native dialog; the renderer only ever receives the path the owner chose.
-   */
-  pickBackupFolder: () => ipcRenderer.invoke('desktop:pick-backup-folder'),
-  revealBackupFolder: (dir) => ipcRenderer.invoke('desktop:reveal-backup-folder', dir),
-  /**
    * Returns a stable, opaque per-machine identifier used for license
    * binding. The renderer falls back to a localStorage-backed UUID in
    * the browser build (see services/license.ts) so the same code works

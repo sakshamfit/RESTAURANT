@@ -14,7 +14,6 @@ import {
   BellRing,
   Star,
   Download,
-  ShieldCheck,
 } from 'lucide-react';
 import { Order, Product, CafeTable, CafeCategory, CafeSettings, WaiterCall } from '../types';
 import { api, BackendHealth } from '../services/api';
@@ -25,7 +24,6 @@ import { AdminReports } from './AdminReports';
 import { AdminSettings } from './AdminSettings';
 import { AdminWaiterCalls } from './AdminWaiterCalls';
 import { AdminFeedbacks } from './AdminFeedbacks';
-import { AdminBackup, BackupFirstRunPrompt } from './AdminBackup';
 import {
   announceOrderReceived,
   announceWaiterCall,
@@ -40,7 +38,7 @@ interface AdminDashboardProps {
   onViewAsCustomer: () => void;
 }
 
-type TabType = 'orders' | 'waiter-calls' | 'feedbacks' | 'products' | 'tables' | 'reports' | 'settings' | 'backup';
+type TabType = 'orders' | 'waiter-calls' | 'feedbacks' | 'products' | 'tables' | 'reports' | 'settings';
 
 /** Where the staff member's spoken-alert preference is remembered. */
 const VOICE_ALERTS_PREF_KEY = 'nagori_voice_alerts';
@@ -495,7 +493,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             { id: 'tables', label: 'Tables & QRs', icon: QrCode },
             { id: 'reports', label: 'Sales & Reports', icon: TrendingUp },
             { id: 'settings', label: 'Café Settings', icon: SettingsIcon },
-            { id: 'backup', label: 'Backup & Recovery', icon: ShieldCheck },
           ].map((tab) => {
             const Icon = tab.icon;
             const isActive = activeTab === tab.id;
@@ -657,16 +654,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 onRefresh={() => fetchAllData(false)}
               />
             )}
-
-            {activeTab === 'backup' && <AdminBackup onRefresh={() => fetchAllData(false)} />}
           </>
         )}
       </main>
-
-      {/* One-time "protect your data" prompt. It never blocks the point of sale:
-          the dialog sits above the dashboard and is dismissable, and the server
-          stops asking once a verified backup exists. */}
-      <BackupFirstRunPrompt onOpenBackup={() => setActiveTab('backup')} />
     </div>
   );
 };

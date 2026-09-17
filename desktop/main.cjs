@@ -144,32 +144,6 @@ function getMachineFingerprint() {
 // ── Local server lifecycle ──────────────────────────────────────────────────
 
 /** Reserve an unused TCP port so the server can be started on it. */
-/** True when nobody else holds this exact port on any interface (the server
- *  binds 0.0.0.0, so the probe has to ask the same way). */
-function portIsFree(port) {
-  return new Promise((resolve) => {
-    const probe = net.createServer();
-    probe.once('error', () => resolve(false));
-    probe.listen(port, '0.0.0.0', () => probe.close(() => resolve(true)));
-  });
-}
-
-/**
- * The loopback port is deliberately stable. Two things are printed or registered
- * against it: the table QR codes (a random port would change every restart and
- * invalidate already-printed codes) and a cloud provider's OAuth redirect address,
- * which only ever returns to a URI that was registered in advance. So the known
- * candidates are tried in order and a random free port is the last resort, not the
- * first choice.
- */
-async function pickPort(preferredPort) {
-  const candidates = preferredPort ? [preferredPort, ...PORT_CANDIDATES] : PORT_CANDIDATES;
-  for (const candidate of candidates) {
-    if (await portIsFree(candidate)) return candidate;
-  }
-  return reservePort();
-}
-
 function reservePort() {
   return new Promise((resolve, reject) => {
     const probe = net.createServer();
@@ -247,12 +221,10 @@ function spawnServer(port) {
 
 /** Start (or restart) the bundled local server, retrying on a busy port. */
 async function ensureServer(preferredPort) {
-  // Two tries at most: the stable port, then any free port. Either way the till
-  // starts — a busy candidate must never turn into "the app won't open".
-  const attempts = [await pickPort(preferredPort), 0];
+  const attempts = preferredPort ? [preferredPort, ...PORT_CANDIDATES] : PORT_CANDIDATES;
 
   for (let i = 0; i < attempts.length; i += 1) {
-    const port = attempts[i] || (await reservePort());
+    const port = i === 0 && preferredPort ? preferredPort : await reservePort();
     try {
       fs.mkdirSync(dataDir(), { recursive: true });
     } catch {
@@ -464,57 +436,6 @@ ipcMain.handle('desktop:open-data-folder', async () => {
     // The error string returned below tells the user what happened.
   }
   return shell.openPath(dataDir());
-});
-
-// Backups folder chooser (Backup Center → "Change folder"). Only ever a real
-// native dialog: the sandboxed renderer cannot browse the disk, and the server
-// additionally refuses any path that does not already exist — so a typo or a
-// dismissed dialog can never silently move backups somewhere invented.
-ipcMain.handle('desktop:pick-backup-folder', async () => {
-  const win = BrowserWindow.getFocusedWindow() || mainWindow;
-  const options = {
-    title: 'Choose where backup files are stored',
-    buttonLabel: 'Use this folder',
-    properties: ['openDirectory', 'createDirectory'],
-  };
-  if (win) options.browserWindow = win;
-  let result;
-  try {
-    result = await dialog.showOpenDialog(options);
-  } catch (error) {
-    return { ok: false, message: `The folder dialog could not be opened: ${error?.message || error}` };
-  }
-  const chosen = result && !result.canceled ? result.filePaths?.[0] : '';
-  if (!chosen) return { ok: false, cancelled: true, message: 'No folder was chosen, so backups stay where they are.' };
-  try {
-    // A folder inside the installation tree is replaced by every app update (and
-    // deleted by an uninstall) — precisely the failure a backup must survive.
-    const installRoot = path.resolve(path.dirname(process.execPath));
-    const resolved = path.resolve(chosen);
-    if (resolved === installRoot || resolved.startsWith(installRoot + path.sep)) {
-      return {
-        ok: false,
-        message: 'Backups cannot live inside the app folder, because updates replace it. Choose a folder in Documents or on another drive instead.',
-      };
-    }
-  } catch {
-    /* the guard is best-effort; the server still validates the path itself */
-  }
-  return { ok: true, path: chosen };
-});
-
-// Reveals the backup folder the server already reported (used by
-// "Open backup folder" in the Recovery tab). Never creates or resolves anything.
-ipcMain.handle('desktop:reveal-backup-folder', async (_event, target) => {
-  const dir = typeof target === 'string' ? target.trim() : '';
-  if (!dir || !path.isAbsolute(dir)) return { ok: false, message: 'No custom backup folder is set yet.' };
-  let openError = '';
-  try {
-    openError = await shell.openPath(dir);
-  } catch (error) {
-    return { ok: false, message: error?.message || 'The folder could not be opened.' };
-  }
-  return openError ? { ok: false, message: openError } : { ok: true };
 });
 
 ipcMain.handle('desktop:machine-fingerprint', () => getMachineFingerprint());

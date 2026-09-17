@@ -7,7 +7,6 @@ import dotenv from 'dotenv';
 import { store } from './src/server/store.js';
 import { initAdminAuth } from './src/server/auth.js';
 import { createApp } from './src/server/app.js';
-import { startBackupScheduler } from './src/server/backup/index.js';
 
 dotenv.config();
 
@@ -47,17 +46,6 @@ async function startServer() {
       : path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => res.sendFile(path.join(distPath, 'index.html')));
-  }
-
-  // Automatic backups (one daily run + catch-up if the machine was off, then the
-  // cloud retry timer). Started after the store is ready and deliberately NOT
-  // started in vercel-api/index.ts: a serverless function must not leave a timer
-  // behind. It never blocks or delays the requests above, and every failure inside
-  // it is recorded instead of thrown.
-  try {
-    startBackupScheduler();
-  } catch (error) {
-    console.warn('[backup] automatic backup scheduler could not start:', (error as Error)?.message || error);
   }
 
   app.listen(PORT, HOST, () => {

@@ -7,20 +7,6 @@ import {
   OrderStatus,
   PaymentStatus,
   SalesSummary,
-  BackupStatusResponse,
-  BackupHistoryEntry,
-  BackupConfigPublic,
-  BackupLocationInfo,
-  CredentialBackendInfo,
-  BackupScheduleStatus,
-  CloudStatusInfo,
-  CloudProviderOption,
-  CloudConnectBegin,
-  CloudConnectOutcome,
-  RemoteBackupFile,
-  CloudSyncSummary,
-  CloudUploadProgress,
-  CloudProviderId,
 } from '../types';
 
 const API_BASE = '/api';
@@ -166,52 +152,6 @@ export interface BackendHealth {
   /** Vercel region that served the request (e.g. "iad1"), when deployed there. */
   region?: string | null;
   timestamp: string;
-}
-
-/**
- * One attempt, no retry — for the backup endpoints. Reads are safe to retry (see
- * fetchWithRetry), but "create a backup", "restore" and "import" are not: a lost
- * response must never turn into a second restore or a duplicate history entry.
- * The server keeps its own journal, so the owner simply reloads the history.
- */
-async function backupJson<T = any>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: init.method || (init.body !== undefined ? 'POST' : 'GET'),
-    headers: {
-      ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      ...getAuthHeader(),
-    },
-    body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
-    cache: 'no-store',
-  });
-  const payload = (await res.json().catch(() => ({}))) as Record<string, any> & T;
-  if (!res.ok) {
-    throw new Error(String(payload?.error || payload?.message || `The backup request failed (HTTP ${res.status}).`));
-  }
-  return payload;
-}
-
-/**
- * The exported file is streamed by the server and the endpoint is authenticated by
- * header, so the bytes are pulled through fetch and saved with an object URL —
- * window.open() would carry no credentials (and the desktop app blocks popups).
- */
-async function backupDownload(path: string, fallbackName: string): Promise<void> {
-  const res = await fetch(`${API_BASE}${path}`, { headers: { ...getAuthHeader() }, cache: 'no-store' });
-  if (!res.ok) {
-    const payload = (await res.json().catch(() => ({}))) as Record<string, any>;
-    throw new Error(String(payload?.error || 'The backup file could not be downloaded.'));
-  }
-  const blob = await res.blob();
-  const name = (res.headers.get('content-disposition') || '').match(/filename="?([^";]+)"?/)?.[1] || fallbackName;
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = name;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
 export const api = {
@@ -758,132 +698,6 @@ export const api = {
     });
     if (!res.ok) throw new Error('Failed to read audit log.');
     return res.json();
-  },
-  // ── Backup Center (local + customer-owned cloud storage) ────────────────────
-  // The server owns every decision here: it verifies the file before it reports
-  // success, and it refuses to call a backup "protected" until a copy was
-  // confirmed remotely. These methods only pass the answer through.
-
-  async adminBackupStatus(): Promise<BackupStatusResponse> {
-    const res = await fetchWithRetry(`${API_BASE}/admin/backup/status`, {
-      headers: { ...getAuthHeader() },
-      cache: 'no-store',
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Backup status could not be loaded.');
-    }
-    return res.json();
-  },
-
-  async adminBackupHistory(): Promise<{ restaurantId: string; backups: BackupHistoryEntry[] }> {
-    return backupJson('/admin/backup/history');
-  },
-
-  async adminBackupSaveConfig(patch: {
-    schedule?: { enabled?: boolean; dailyTime?: string };
-    retention?: { daily?: number; weekly?: number; monthly?: number };
-    localDir?: string | null;
-    encryption?: { action: 'set' | 'clear'; password?: string; currentPassword?: string | null };
-  }): Promise<{ ok: boolean; config: BackupConfigPublic; location: BackupLocationInfo; schedule: BackupScheduleStatus; encryption: { encrypted: boolean; message: string; keyCached: boolean } | null }> {
-    return backupJson('/admin/backup/config', { method: 'POST', body: patch });
-  },
-
-  async adminBackupCreate(body: { note?: string; password?: string | null } = {}): Promise<{
-    ok: boolean;
-    record: BackupHistoryEntry;
-    header: Record<string, unknown>;
-    durationMs: number;
-    encrypted: boolean;
-    cloud: 'queued' | 'skipped';
-    message: string;
-  }> {
-    return backupJson('/admin/backup/create', { method: 'POST', body });
-  },
-
-  async adminBackupUpload(recordId?: string): Promise<CloudSyncSummary> {
-    return backupJson('/admin/backup/upload', { method: 'POST', body: recordId ? { recordId } : {} });
-  },
-
-  async adminBackupRestore(body: { recordId: string; password?: string | null; acknowledgeForeignRestaurant?: boolean }): Promise<{
-    ok: boolean;
-    restored: boolean;
-    message: string;
-    safetyBackup?: string | null;
-    counts?: Record<string, number>;
-    rolledBack?: boolean;
-    rollbackMessage?: string | null;
-  }> {
-    return backupJson('/admin/backup/restore', { method: 'POST', body });
-  },
-
-  /** Reads a chosen .rdbak in the browser and hands it to the server to verify. */
-  async adminBackupImportFile(file: File, password?: string | null): Promise<{ ok: boolean; record: BackupHistoryEntry; foreignRestaurant: boolean; message: string }> {
-    const base64 = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || '').replace(/^data:[^,]+,/, ''));
-      reader.onerror = () => reject(new Error('That file could not be read. Try again or pick it again.'));
-      reader.readAsDataURL(file);
-    });
-    return backupJson('/admin/backup/import', { method: 'POST', body: { fileName: file.name, contentBase64: base64, password: password ?? null } });
-  },
-
-  async adminBackupVerify(recordId: string, password?: string | null): Promise<{ ok: boolean; verified: boolean; message: string }> {
-    return backupJson(`/admin/backup/${encodeURIComponent(recordId)}/verify`, { method: 'POST', body: { password: password ?? null } });
-  },
-
-  async adminBackupDownload(recordId: string, fileName: string): Promise<void> {
-    return backupDownload(`/admin/backup/${encodeURIComponent(recordId)}/export`, fileName || 'backup.rdbak');
-  },
-
-  async adminBackupDelete(recordId: string): Promise<{ ok: boolean; deleted: boolean; message: string; cloud: CloudStatusInfo }> {
-    return backupJson(`/admin/backup/${encodeURIComponent(recordId)}/delete`, { method: 'POST', body: {} });
-  },
-
-  /** Answers the first-run dialog: "later" never blocks the POS, "complete" closes it for good. */
-  async adminBackupFirstRun(action: 'dismiss' | 'complete'): Promise<{ ok: boolean; firstRun: BackupConfigPublic['firstRun'] }> {
-    return backupJson('/admin/backup/first-run', { method: 'POST', body: { action } });
-  },
-
-  async adminCloudProviders(): Promise<{ ok: boolean; providers: CloudProviderOption[] }> {
-    return backupJson('/admin/cloud/providers');
-  },
-
-  async adminCloudStatus(): Promise<{ ok: boolean; cloud: CloudStatusInfo; uploads: CloudUploadProgress[] }> {
-    return backupJson('/admin/cloud/status');
-  },
-
-  async adminCloudConnect(provider: CloudProviderId, options: { deviceCode?: boolean } = {}): Promise<CloudConnectBegin> {
-    return backupJson(`/admin/cloud/${provider}/connect`, { method: 'POST', body: options });
-  },
-
-  async adminCloudConnectResult(state: string): Promise<CloudConnectOutcome> {
-    const res = await fetchWithRetry(`${API_BASE}/admin/cloud/connect-result?state=${encodeURIComponent(state)}`, {
-      headers: { ...getAuthHeader() },
-      cache: 'no-store',
-    });
-    if (!res.ok) throw new Error('The sign-in result could not be read.');
-    return res.json();
-  },
-
-  async adminCloudDisconnect(): Promise<{ ok: boolean; forgotAccess: boolean; cloudFilesKept: boolean; remoteBackups: number; message: string; cloud: CloudStatusInfo }> {
-    return backupJson('/admin/cloud/disconnect', { method: 'POST', body: {} });
-  },
-
-  async adminCloudTest(): Promise<{ ok: boolean; message: string; cloud: CloudStatusInfo }> {
-    return backupJson('/admin/cloud/test', { method: 'POST', body: {} });
-  },
-
-  async adminCloudRemote(): Promise<{ ok: boolean; files: RemoteBackupFile[]; cloud: CloudStatusInfo }> {
-    return backupJson('/admin/cloud/remote');
-  },
-
-  async adminCloudRemoteImport(remoteId: string, password?: string | null): Promise<{ ok: boolean; record: BackupHistoryEntry; foreignRestaurant: boolean; alreadyLocal: boolean; message: string }> {
-    return backupJson('/admin/cloud/remote/import', { method: 'POST', body: { remoteId, password: password ?? null } });
-  },
-
-  async adminCloudRemoteDelete(remoteId: string, confirmLastCopy = false): Promise<{ ok: boolean; deleted: boolean; message: string; cloud: CloudStatusInfo }> {
-    return backupJson('/admin/cloud/remote/delete', { method: 'POST', body: { remoteId, confirmLastCopy } });
   },
 };
 
