@@ -263,7 +263,13 @@ export async function startDeviceCode(options: {
       signal: AbortSignal.timeout(20_000),
     });
   } catch (error) {
-    throw new CloudError(`Could not start device sign-in with the cloud provider: ${(error as Error)?.message || error}`, 'offline', { retryable: true });
+    // Owner-readable: the raw transport string ("fetch failed", ECONNRESET) means
+    // nothing at the counter, and the retry is automatic anyway.
+    throw new CloudError(
+      'The cloud provider could not be reached, so the sign-in code could not be requested. Check this computer\u2019s internet connection and try again \u2014 nothing was changed.',
+      'offline',
+      { retryable: true },
+    );
   }
   const payload = (await response.json().catch(() => ({}))) as Partial<DeviceCode>;
   if (!payload.deviceCode || !payload.verificationUri) {

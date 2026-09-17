@@ -866,6 +866,23 @@ export const AdminBackup: React.FC<{ onRefresh?: () => void }> = ({ onRefresh })
                         >
                           Connect {provider.label}
                         </Button>
+                        {provider.supportsDeviceCode ? (
+                          <Button
+                            icon={KeyRound}
+                            busy={connect?.begin.provider === provider.id}
+                            onClick={() =>
+                              void run(`connect-${provider.id}-code`, async () => {
+                                // No browser redirect at all: useful on a till whose
+                                // loopback port or network makes the redirect awkward.
+                                const begun = await api.adminCloudConnect(provider.id, { deviceCode: true });
+                                setConnect({ begin: begun, outcome: null });
+                                return { tone: 'idle', message: null };
+                              })
+                            }
+                          >
+                            Sign in with a code instead
+                          </Button>
+                        ) : null}
                       </div>
                     )}
                   </li>
