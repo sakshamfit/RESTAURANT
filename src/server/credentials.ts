@@ -1,6 +1,7 @@
 import { spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { replaceFile } from './atomicFile.js';
 import crypto from 'crypto';
 import { dataDir } from './backupConfig.js';
 
@@ -84,6 +85,7 @@ function isWin32() {
 
 const POWERSHELL_PROTECT = `
 $ErrorActionPreference = 'Stop'
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 Add-Type -AssemblyName System.Security
 $raw = [Console]::In.ReadToEnd()
 $bytes = [Text.Encoding]::UTF8.GetBytes($raw)
@@ -147,6 +149,7 @@ export function credentialBackendInfo(): CredentialBackendInfo {
 
 const POWERSHELL_UNPROTECT = `
 $ErrorActionPreference = 'Stop'
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 Add-Type -AssemblyName System.Security
 $raw = [Console]::In.ReadToEnd()
 $bytes = [Convert]::FromBase64String($raw.Trim())
@@ -207,7 +210,7 @@ function writeFallback(payload: string, target: string) {
   const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tmp, payload, { encoding: 'utf8', mode: 0o600 });
   fs.chmodSync(path.dirname(target), 0o700);
-  fs.renameSync(tmp, target);
+  replaceFile(tmp, target);
   try {
     fs.chmodSync(target, 0o600);
   } catch {

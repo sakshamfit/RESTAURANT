@@ -14,6 +14,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { replaceFile } from '../atomicFile.js';
 import crypto from 'crypto';
 import { effectiveBackupDir, loadBackupConfig, type BackupClass, type BackupConfig } from '../backupConfig.js';
 import { BackupError } from './errors.js';
@@ -231,7 +232,7 @@ export function saveManifest(manifest: Manifest, dir = backupDir()): void {
     const payload = JSON.stringify({ version: 1, records: manifest.records.slice(0, MAX_MANIFEST_RECORDS) }, null, 2);
     const tmp = `${manifestPath(dir)}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, payload, { encoding: 'utf8', mode: 0o600 });
-    fs.renameSync(tmp, manifestPath(dir));
+    replaceFile(tmp, manifestPath(dir));
   } catch (error) {
     // Losing the cache never means losing a backup.
     console.warn('[backup] Could not write manifest.json (backup files remain intact):', (error as Error)?.message || error);

@@ -130,6 +130,15 @@ the off-site copies age out on their own schedule or by the owner's hand.
 Internal codes (`401`, `insufficient_space`, `ETIMEDOUT`, stack traces) are translated
 by the API layer into those sentences; a raw code never reaches the screen.
 
+On Windows, replacing a small state file (`backup-config.json`, `manifest.json`, the
+token fallback) is done through a bounded retry, because antivirus or another open
+window can hold the target for a moment and a plain rename then fails with `EPERM`.
+Either the old content or the new content is always on disk — never a mix — and if
+every attempt fails the previous file is left intact and the error is shown instead
+of a silent half-save. The directory `fsync` that makes a rename durable on
+Linux/macOS is skipped there (opening a directory is not permitted), which costs a
+tiny amount of crash-consistency and nothing else.
+
 ---
 
 ## 5. Security

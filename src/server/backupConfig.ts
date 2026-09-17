@@ -1,4 +1,5 @@
 import fs from 'fs';
+import { replaceFile } from './atomicFile.js';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
@@ -257,7 +258,7 @@ function writeConfig(config: BackupConfig, file: string) {
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
   const payload = JSON.stringify(config, null, 2);
   fs.writeFileSync(tmp, payload, { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(tmp, file);
+  replaceFile(tmp, file);
   try {
     fs.chmodSync(file, 0o600);
   } catch {
