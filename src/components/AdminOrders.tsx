@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Clock,
   ChefHat,
@@ -21,7 +22,7 @@ import {
 import { Order, OrderStatus, PaymentStatus, CafeSettings } from '../types';
 import { api, generateWhatsAppOrderUrl } from '../services/api';
 import { useToday } from '../utils/useToday';
-import { formatOrderStamp, isSameLocalDay } from '../utils/datetime';
+import { formatOrderStamp, formatOrderTime, isSameLocalDay } from '../utils/datetime';
 
 interface AdminOrdersProps {
   orders: Order[];
@@ -30,6 +31,113 @@ interface AdminOrdersProps {
   voiceEnabled: boolean;
   onToggleVoice: () => void;
 }
+
+/** One bill sent to the printer. `seq` makes a repeated click on the same bill
+ *  re-open the print sheet instead of being swallowed as a duplicate render. */
+interface BillPrintJob {
+  seq: number;
+  order: Order;
+}
+
+/* Receipt amounts print exactly as stored (no forced decimals); a missing
+ * value prints an ASCII dash instead of "undefined"/"NaN", because plain ASCII
+ * is what every thermal driver and normal printer can render. */
+const DASH = '-';
+const receiptAmount = (value?: number) =>
+  typeof value === 'number' && Number.isFinite(value) ? String(value) : DASH;
+
+/**
+ * The printed bill. This node (`#printable-bill`) is the only thing
+ * `@media print` leaves on the page (see src/index.css), and its layout is the
+ * one the KOT popup used before: 280px-wide monospace with dashed rules, so
+ * both 80mm thermal rolls and a normal sheet come out exactly as before.
+ * Deliberately plain markup + inline styles — no Tailwind state, no images —
+ * so it renders the same in every browser and in the desktop shell.
+ */
+const BillPrintSheet: React.FC<{ order: Order; settings?: CafeSettings }> = ({ order, settings }) => {
+  const currency = settings?.currency ?? '';
+  const items = Array.isArray(order.items) ? order.items : [];
+  const createdAt = order.timeline?.createdAt;
+  const timeText = createdAt ? formatOrderTime(createdAt) : '';
+  const tableText = order.tableName || (order.tableNumber != null ? `Table ${order.tableNumber}` : '');
+
+  return (
+    <div
+      id="printable-bill"
+      style={{
+        fontFamily: 'monospace',
+        fontSize: '16px',
+        padding: '15px',
+        width: '280px',
+        margin: '0 auto',
+        background: '#fff',
+        color: '#000',
+        textAlign: 'left',
+      }}
+    >
+      <div style={{ textAlign: 'center', borderBottom: '1px dashed #000', paddingBottom: '8px', marginBottom: '8px' }}>
+        <h2 style={{ margin: 0, fontSize: '24px', fontWeight: 'bold', lineHeight: 1.1 }}>
+          {settings?.cafeName || 'Bill'}
+        </h2>
+        {settings?.tagline ? <div>{settings.tagline}</div> : null}
+        <div style={{ fontSize: '18px', fontWeight: 'bold', margin: '5px 0' }}>{tableText}</div>
+        <div>Order: {order.orderNumber || DASH} | Customer: {order.customerName || 'Guest'}</div>
+        <div>Time: {timeText || DASH}</div>
+      </div>
+
+      <table style={{ width: '100%', borderCollapse: 'collapse', margin: '10px 0' }}>
+        <tbody>
+          {items.length === 0 ? (
+            <tr>
+              <td style={{ padding: '4px 0', fontStyle: 'italic' }}>No items on this bill</td>
+            </tr>
+          ) : (
+            items.map((it, idx) => (
+              <tr key={it?.id ?? `line-${idx}`}>
+                <td style={{ padding: '4px 0', fontWeight: 'bold' }}>
+                  {/* Plain ASCII text only: some thermal drivers are not UTF-8 safe. */}
+                  {it?.quantity ?? 1}x {it?.productName ?? 'Item'}
+                  {it?.variantName ? ` (${it.variantName})` : ''}
+                </td>
+                <td style={{ textAlign: 'right', padding: '4px 0' }}>
+                  {currency}
+                  {receiptAmount(it?.totalPrice)}
+                </td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+
+      {order.specialInstructions ? (
+        <div style={{ fontWeight: 'bold', margin: '5px 0' }}>NOTE: {order.specialInstructions}</div>
+      ) : null}
+
+      <div
+        style={{
+          borderTop: '1px dashed #000',
+          borderBottom: '1px dashed #000',
+          padding: '6px 0',
+          fontSize: '16px',
+          fontWeight: 'bold',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <span>TOTAL:</span>
+          <span>
+            {currency}
+            {receiptAmount(order.totalAmount)}
+          </span>
+        </div>
+        <div style={{ fontSize: '12px', fontWeight: 'normal', marginTop: '2px' }}>
+          Payment: {(order.paymentStatus || 'unpaid').toUpperCase()}
+        </div>
+      </div>
+
+      <div style={{ textAlign: 'center', fontSize: '11px', marginTop: '10px' }}>Thank you! Visit Again.</div>
+    </div>
+  );
+};
 
 export const AdminOrders: React.FC<AdminOrdersProps> = ({
   orders,
@@ -42,6 +150,11 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [selectedTable, setSelectedTable] = useState<string>('all');
   const [updatingId, setUpdatingId] = useState<string | null>(null);
+
+  // Bill / KOT print job. `null` = no print sheet open.
+  const [printJob, setPrintJob] = useState<BillPrintJob | null>(null);
+  const printSeq = useRef(0);
+  const dialogOpenedForSeq = useRef<number | null>(null);
 
   // Pinned to the current local calendar day and re-rendered automatically the
   // moment the clock crosses 12:00 AM — that is what makes the "Today's Live"
@@ -106,66 +219,78 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
     }
   };
 
-  const handlePrintKOT = (order: Order) => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) {
-      alert('Please allow popups to print receipt');
+  // ── Print Bill / KOT ─────────────────────────────────────────────────────
+  // This used to write the receipt into a `window.open('', '_blank')` popup.
+  // A popup is never guaranteed on the POS machine: Chrome can veto it, and
+  // the packaged desktop console denies *every* window.open (see
+  // `setWindowOpenHandler` in desktop/main.cjs), so `window.open` handed back
+  // `null` and staff got an alert instead of a receipt — no print dialog, no
+  // way to recover from the browser settings on the floor.
+  //
+  // The receipt is therefore rendered on this page (#printable-bill) and sent
+  // straight to window.print(), which is the popup-free mechanism the QR
+  // standee dialog in AdminTables already uses. Nothing new is opened, so
+  // nothing can be blocked, and repeated clicks can never pile up windows.
+  const closePrintSheet = useCallback(() => {
+    setPrintJob(null);
+    dialogOpenedForSeq.current = null;
+  }, []);
+
+  const handlePrintKOT = useCallback((order?: Order | null) => {
+    if (!order || !order.id) {
+      // Never fail silently if a card was refreshed away under the click.
+      alert('This bill could not be loaded. Please refresh the order list and try again.');
+      return;
+    }
+    printSeq.current += 1;
+    setPrintJob({ seq: printSeq.current, order });
+  }, []);
+
+  useEffect(() => {
+    if (!printJob) {
+      document.body.classList.remove('bill-printing');
       return;
     }
 
-    const itemsHtml = order.items
-      .map(
-        (it) => `
-        <tr>
-          <td style="padding: 4px 0; font-weight: bold;">${it.quantity}x ${it.productName} ${it.variantName ? `(${it.variantName})` : ''}</td>
-          <td style="text-align: right; padding: 4px 0;">${settings.currency}${it.totalPrice}</td>
-        </tr>`
-      )
-      .join('');
+    // Scopes the print rules in src/index.css to this sheet only, so printing
+    // a bill never changes how anything else in the app prints or looks.
+    document.body.classList.add('bill-printing');
 
-    printWindow.document.write(`
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <title>KOT - ${order.orderNumber}</title>
-          <style>
-            body { font-family: monospace; padding: 15px; width: 280px; margin: 0 auto; }
-            .header { text-align: center; border-bottom: 1px dashed #000; padding-bottom: 8px; margin-bottom: 8px; }
-            .table-info { font-size: 18px; font-weight: bold; margin: 5px 0; }
-            table { width: 100%; border-collapse: collapse; margin: 10px 0; }
-            .total { border-top: 1px dashed #000; border-bottom: 1px dashed #000; padding: 6px 0; font-size: 16px; font-weight: bold; }
-            .footer { text-align: center; font-size: 11px; margin-top: 10px; }
-          </style>
-        </head>
-        <body onload="window.print();">
-          <div class="header">
-            <h2 style="margin: 0;">${settings.cafeName}</h2>
-            <div>${settings.tagline}</div>
-            <div class="table-info">${order.tableName}</div>
-            <div>Order: ${order.orderNumber} | Customer: ${order.customerName}</div>
-            <div>Time: ${new Date(order.timeline.createdAt).toLocaleTimeString()}</div>
-          </div>
-          <table>
-            ${itemsHtml}
-          </table>
-          ${order.specialInstructions ? `<div style="font-weight: bold; margin: 5px 0;">NOTE: ${order.specialInstructions}</div>` : ''}
-          <div class="total">
-            <div style="display: flex; justify-content: space-between;">
-              <span>TOTAL:</span>
-              <span>${settings.currency}${order.totalAmount}</span>
-            </div>
-            <div style="font-size: 12px; font-weight: normal; margin-top: 2px;">
-              Payment: ${order.paymentStatus.toUpperCase()}
-            </div>
-          </div>
-          <div class="footer">
-            Thank you! Visit Again.
-          </div>
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
-  };
+    let frame = 0;
+    if (dialogOpenedForSeq.current !== printJob.seq) {
+      // Two frames: the sheet is committed and painted before the dialog
+      // snapshots the page, so a long bill never prints half-rendered.
+      frame = window.requestAnimationFrame(() => {
+        frame = window.requestAnimationFrame(() => {
+          if (dialogOpenedForSeq.current === printJob.seq) return;
+          dialogOpenedForSeq.current = printJob.seq;
+          try {
+            window.print();
+          } catch {
+            alert(
+              'The print dialog could not be opened. Please allow pop-ups for this application, or use your browser menu → Print, then tap Print on this bill.'
+            );
+          }
+        });
+      });
+    }
+
+    // Dismiss the sheet once the dialog is gone (printed or cancelled) so the
+    // kitchen feed is exactly where the staff left it. If a browser never
+    // fires `afterprint`, the Close button below still works.
+    const handleAfterPrint = () => closePrintSheet();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closePrintSheet();
+    };
+    window.addEventListener('afterprint', handleAfterPrint);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      window.removeEventListener('afterprint', handleAfterPrint);
+      window.removeEventListener('keydown', handleKeyDown);
+      document.body.classList.remove('bill-printing');
+    };
+  }, [printJob, closePrintSheet]);
 
   const todayOrders = orders.filter((o) => isOrderToday(o.timeline.createdAt));
   const activeOrdersCount = orders.filter((o) => o.status === 'new' || o.status === 'accepted' || o.status === 'ready').length;
@@ -560,6 +685,73 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
           })}
         </div>
       )}
+
+      {/* ── Print Bill / KOT sheet ──────────────────────────────────────────
+          Portalled onto <body> (outside the POS layout) so the print rules can
+          isolate the receipt, and so closing it can never disturb the kitchen
+          feed underneath. No new window is involved, so nothing is popup
+          blocked and repeated clicks reuse this same sheet. */}
+      {printJob &&
+        createPortal(
+          <div
+            id="printable-bill-root"
+            className="bill-print-shell fixed inset-0 z-50 overflow-y-auto bg-stone-950/75 backdrop-blur-xs flex items-start sm:items-center justify-center p-4 font-sans"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Print bill ${printJob.order.orderNumber || ''}`.trim()}
+          >
+            <div className="bill-print-shell bg-white w-full max-w-[360px] rounded-2xl shadow-2xl overflow-hidden border border-[#e7e2dc]">
+              {/* Header */}
+              <div className="bill-print-chrome p-4 bg-[#1e130c] text-white flex items-center justify-between gap-3 border-b border-[#3a291e]">
+                <div className="min-w-0">
+                  <h3 className="text-sm font-extrabold text-white tracking-tight truncate">Print Bill / KOT</h3>
+                  <p className="text-[11px] text-stone-400 font-medium truncate">
+                    {printJob.order.orderNumber || '-'} &bull;{' '}
+                    {printJob.order.tableName || (printJob.order.tableNumber != null ? `Table ${printJob.order.tableNumber}` : 'Bill')}
+                  </p>
+                </div>
+                <button
+                  onClick={closePrintSheet}
+                  title="Close"
+                  aria-label="Close print preview"
+                  className="p-1.5 rounded-lg hover:bg-[#3a291e] text-stone-300 cursor-pointer shrink-0"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Receipt preview - #printable-bill is the node @media print keeps */}
+              <div className="bill-print-shell p-3 sm:p-4 bg-stone-100 flex justify-center overflow-x-auto">
+                <div className="bill-print-shell shadow-sm border border-stone-200">
+                  <BillPrintSheet order={printJob.order} settings={settings} />
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="bill-print-chrome p-4 bg-white border-t border-[#e7e2dc] space-y-2">
+                <button
+                  onClick={() => window.print()}
+                  className="w-full py-2.5 px-4 bg-[#ea580c] hover:bg-[#c2410c] text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow-md transition-colors cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Print Bill</span>
+                </button>
+                <p className="text-[10px] text-stone-500 leading-relaxed text-center">
+                  The print dialog opens by itself. Pick the thermal printer or a normal one - no
+                  pop-up permission needed.
+                </p>
+                <button
+                  onClick={closePrintSheet}
+                  className="w-full py-2 px-4 bg-[#faf8f5] hover:bg-[#f0ebe1] text-[#6b5d52] font-semibold text-xs rounded-xl flex items-center justify-center gap-1.5 transition-colors cursor-pointer border border-[#e7e2dc]"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  <span>Close</span>
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 };

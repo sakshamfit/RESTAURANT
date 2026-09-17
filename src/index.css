@@ -140,3 +140,54 @@ html, body {
     box-shadow: none !important;
   }
 }
+
+/* ── Bill / KOT print sheet (Admin -> Live Orders -> Print) ──────────────────
+   Same popup-free mechanism the QR standee above uses: the receipt is rendered
+   on this page inside #printable-bill-root and window.print() is called on the
+   POS window itself, so there is no window.open() for a popup blocker (or the
+   desktop shell's deny-everything setWindowOpenHandler) to veto.
+   Every rule is scoped to `body.bill-printing`, which is only set while the
+   bill sheet is open - the normal app UI, the QR standee print above and an
+   ordinary Ctrl+P are all untouched. */
+@media print {
+  /* Print only the portalled sheet. The rest of the app is taken out of the
+     page (not merely hidden) so a long bill never leaves blank pages behind. */
+  body.bill-printing > *:not(#printable-bill-root) {
+    display: none !important;
+  }
+  body.bill-printing {
+    min-height: 0 !important;
+    background: #fff !important;
+  }
+  /* Flatten the dialog chrome (backdrop, card, preview padding) so the receipt
+     sits at the top of the paper with no card border or shadow around it. */
+  body.bill-printing .bill-print-shell {
+    position: static !important;
+    inset: auto !important;
+    display: block !important;
+    overflow: visible !important;
+    width: auto !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    background: #fff !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  body.bill-printing .bill-print-chrome {
+    display: none !important;
+  }
+  /* The global rule above blanks every element on the page; the receipt opts
+     back in. Its 280px monospace layout is deliberately unchanged, so 80mm
+     thermal rolls and normal sheets keep printing exactly as before. */
+  body.bill-printing #printable-bill,
+  body.bill-printing #printable-bill * {
+    visibility: visible !important;
+  }
+  body.bill-printing #printable-bill {
+    margin: 0 auto !important;
+  }
+}
