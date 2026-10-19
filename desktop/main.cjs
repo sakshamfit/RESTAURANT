@@ -440,6 +440,42 @@ ipcMain.handle('desktop:open-data-folder', async () => {
 
 ipcMain.handle('desktop:machine-fingerprint', () => getMachineFingerprint());
 
+/**
+ * Native print dialog for the staff console.
+ *
+ * `window.print()` inside the renderer is not dependable in Electron (and the
+ * shell deliberately denies every window.open), so Print Bill / KOT and the
+ * table QR standee call this over the preload bridge instead. `webContents
+ * .print()` prints the *current page* with the app's @media print rules, which
+ * is exactly what the popup-based implementation used to produce, and it
+ * opens the normal system print dialog — no popup, no popup blocker.
+ *
+ * The promise resolves after the dialog is dismissed so the renderer can
+ * close its preview sheet. Failure reasons (for example "No printers
+ * available") are returned instead of thrown so the UI can explain them.
+ */
+ipcMain.handle('desktop:print', async (event) => {
+  const contents = event.sender;
+  if (!contents || contents.isDestroyed()) {
+    return { success: false, failureReason: 'The app window is not available.' };
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (success, failureReason) => {
+      if (settled) return;
+      settled = true;
+      resolve({ success: Boolean(success), failureReason: failureReason ? String(failureReason) : undefined });
+    };
+    try {
+      contents.print({ silent: false, printBackground: true }, (success, failureReason) => {
+        finish(success, failureReason);
+      });
+    } catch (error) {
+      finish(false, error?.message || String(error));
+    }
+  });
+});
+
 // ── Auto-update ────────────────────────────────────────────────────────────
 // Uses electron-updater. Configuration is read from desktop/package.json's
 //  block. When  is not present (dev builds

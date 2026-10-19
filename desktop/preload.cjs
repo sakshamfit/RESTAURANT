@@ -21,6 +21,14 @@ contextBridge.exposeInMainWorld('nagoriDesktop', {
    */
   getMachineFingerprint: () => ipcRenderer.invoke('desktop:machine-fingerprint'),
   /**
+   * Opens the native print dialog (webContents.print) for the console
+   * window. This is the popup-free print path used by Print Bill / KOT and
+   * the table QR standee: it never calls window.open(), so neither the
+   * shell's deny-everything window handler nor a browser popup blocker can
+   * stop the dialog from appearing.
+   */
+  print: () => ipcRenderer.invoke('desktop:print'),
+  /**
    * Auto-update. The main process owns the actual download + install
    * flow (via electron-updater); the renderer just asks "is there an
    * update?" or triggers the interactive "Check for updates" dialog

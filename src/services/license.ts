@@ -218,12 +218,23 @@ export const licenseService = {
     return res.json();
   },
 
+  /**
+   * Removes the locally stored license (server route: POST
+   * /api/license/delete). The old URL here — /api/license/deactivate — never
+   * existed, so every call 404'd. Returns the fresh status alongside the
+   * deletion result so callers can re-render the wizard immediately.
+   */
   async deactivate(): Promise<{ ok: boolean; status: LicenseStatusPayload }> {
-    const res = await fetchWithRetry(`${API_BASE}/license/deactivate`, { method: 'POST' });
+    const res = await fetchWithRetry(`${API_BASE}/license/delete`, { method: 'POST' });
     if (!res.ok) {
       throw new Error('Deactivation failed.');
     }
-    return res.json();
+    const result = await res.json();
+    if (result?.ok === false) {
+      throw new Error(result.error || 'Deactivation failed.');
+    }
+    const status = await licenseService.getStatus();
+    return { ok: true, status: status.status };
   },
 
   /**

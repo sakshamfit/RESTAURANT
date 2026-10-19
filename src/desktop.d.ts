@@ -17,6 +17,12 @@ export interface NagoriDesktopInfo {
   lanUrls: Array<{ url: string; address: string; interface: string }>;
 }
 
+export interface NagoriDesktopPrintResult {
+  success: boolean;
+  /** Present when `success` is false (e.g. "No printers available"). */
+  failureReason?: string;
+}
+
 export interface NagoriDesktopBridge {
   isDesktop: boolean;
   getInfo: () => Promise<NagoriDesktopInfo>;
@@ -24,6 +30,12 @@ export interface NagoriDesktopBridge {
   openDataFolder: () => Promise<string>;
   /** Stable per-machine identifier used to bind a license. */
   getMachineFingerprint: () => Promise<string>;
+  /**
+   * Opens the native print dialog for the console window. Resolves after the
+   * dialog closes. Used instead of `window.print()` so printing works even
+   * though the desktop shell denies every popup/window.open.
+   */
+  print: () => Promise<NagoriDesktopPrintResult>;
   /**
    * Auto-update. `getUpdateState` returns a snapshot (no UI); the
    * `checkForUpdates` call shows the same native dialog as the
