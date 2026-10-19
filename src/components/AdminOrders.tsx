@@ -23,6 +23,7 @@ import { Order, OrderStatus, PaymentStatus, CafeSettings } from '../types';
 import { api, generateWhatsAppOrderUrl } from '../services/api';
 import { useToday } from '../utils/useToday';
 import { formatOrderStamp, formatOrderTime, isSameLocalDay } from '../utils/datetime';
+import { printCurrentPage } from '../utils/print';
 
 interface AdminOrdersProps {
   orders: Order[];
@@ -153,6 +154,9 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
 
   // Bill / KOT print job. `null` = no print sheet open.
   const [printJob, setPrintJob] = useState<BillPrintJob | null>(null);
+  // Shown inside the sheet instead of a popup-blocked alert, so staff get a
+  // retry button without leaving the order they are looking at.
+  const [printError, setPrintError] = useState<string | null>(null);
   const printSeq = useRef(0);
   const dialogOpenedForSeq = useRef<number | null>(null);
 
@@ -224,17 +228,36 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
   // A popup is never guaranteed on the POS machine: Chrome can veto it, and
   // the packaged desktop console denies *every* window.open (see
   // `setWindowOpenHandler` in desktop/main.cjs), so `window.open` handed back
-  // `null` and staff got an alert instead of a receipt — no print dialog, no
-  // way to recover from the browser settings on the floor.
+  // `null` and staff got a "please allow popups" alert instead of a receipt.
   //
   // The receipt is therefore rendered on this page (#printable-bill) and sent
-  // straight to window.print(), which is the popup-free mechanism the QR
-  // standee dialog in AdminTables already uses. Nothing new is opened, so
-  // nothing can be blocked, and repeated clicks can never pile up windows.
+  // straight to the system print dialog through utils/print.ts: the desktop
+  // shell uses webContents.print() and the browser uses window.print(). Both
+  // print this window — no new window is opened, so a popup blocker can never
+  // stop the dialog, and repeated clicks can never pile up windows.
   const closePrintSheet = useCallback(() => {
     setPrintJob(null);
+    setPrintError(null);
     dialogOpenedForSeq.current = null;
   }, []);
+
+  const runPrint = useCallback(
+    async (seq: number) => {
+      setPrintError(null);
+      const outcome = await printCurrentPage();
+      // A newer Print click may have replaced this bill while the dialog was
+      // open; only the request that still owns the sheet may update it.
+      if (dialogOpenedForSeq.current !== seq) return;
+      if (!outcome.ok) {
+        setPrintError(outcome.error || 'The print dialog could not be opened. Please press Print again.');
+        return;
+      }
+      // The desktop dialog resolves after it closes, so the preview can be
+      // dismissed now. In a browser, afterprint below does the same.
+      if (outcome.desktop) closePrintSheet();
+    },
+    [closePrintSheet],
+  );
 
   const handlePrintKOT = useCallback((order?: Order | null) => {
     if (!order || !order.id) {
@@ -242,9 +265,16 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
       alert('This bill could not be loaded. Please refresh the order list and try again.');
       return;
     }
+    setPrintError(null);
     printSeq.current += 1;
     setPrintJob({ seq: printSeq.current, order });
   }, []);
+
+  const handlePrintAgain = useCallback(() => {
+    if (!printJob) return;
+    setPrintError(null);
+    void runPrint(printJob.seq);
+  }, [printJob, runPrint]);
 
   useEffect(() => {
     if (!printJob) {
@@ -264,13 +294,7 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
         frame = window.requestAnimationFrame(() => {
           if (dialogOpenedForSeq.current === printJob.seq) return;
           dialogOpenedForSeq.current = printJob.seq;
-          try {
-            window.print();
-          } catch {
-            alert(
-              'The print dialog could not be opened. Please allow pop-ups for this application, or use your browser menu → Print, then tap Print on this bill.'
-            );
-          }
+          void runPrint(printJob.seq);
         });
       });
     }
@@ -290,7 +314,7 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
       window.removeEventListener('keydown', handleKeyDown);
       document.body.classList.remove('bill-printing');
     };
-  }, [printJob, closePrintSheet]);
+  }, [printJob, closePrintSheet, runPrint]);
 
   const todayOrders = orders.filter((o) => isOrderToday(o.timeline.createdAt));
   const activeOrdersCount = orders.filter((o) => o.status === 'new' || o.status === 'accepted' || o.status === 'ready').length;
@@ -729,8 +753,14 @@ export const AdminOrders: React.FC<AdminOrdersProps> = ({
 
               {/* Actions */}
               <div className="bill-print-chrome p-4 bg-white border-t border-[#e7e2dc] space-y-2">
+                {printError && (
+                  <div className="flex items-start gap-2 p-2.5 bg-red-50 border border-red-200 rounded-xl text-[11px] text-red-800 text-left">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{printError}</span>
+                  </div>
+                )}
                 <button
-                  onClick={() => window.print()}
+                  onClick={handlePrintAgain}
                   className="w-full py-2.5 px-4 bg-[#ea580c] hover:bg-[#c2410c] text-white font-bold text-xs rounded-xl flex items-center justify-center gap-1.5 shadow-md transition-colors cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5" />

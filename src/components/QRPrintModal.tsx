@@ -4,6 +4,7 @@ import { X, Download, Printer, ExternalLink, Coffee, ArrowLeft, Wifi, Copy, Chec
 import { CafeTable, CafeSettings } from '../types';
 import type { NagoriDesktopInfo } from '../desktop';
 import { fetchNetworkInfo, pickBestQrBaseUrl, buildOrderUrl, isLoopbackOrigin, type NetworkInfo } from '../utils/qrBaseUrl';
+import { printCurrentPage } from '../utils/print';
 
 interface QRPrintModalProps {
   table: CafeTable;
@@ -27,6 +28,7 @@ export const QRPrintModal: React.FC<QRPrintModalProps> = ({
   const [desktopInfo, setDesktopInfo] = useState<NagoriDesktopInfo | null>(null);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [loadingNetwork, setLoadingNetwork] = useState<boolean>(true);
+  const [printError, setPrintError] = useState<string | null>(null);
   const printAreaRef = useRef<HTMLDivElement>(null);
 
   // Fetch desktop info and network info in parallel
@@ -135,8 +137,14 @@ export const QRPrintModal: React.FC<QRPrintModalProps> = ({
     link.click();
   };
 
-  const handlePrint = () => {
-    window.print();
+  const handlePrint = async () => {
+    setPrintError(null);
+    // Native dialog in the desktop console, window.print() in a browser —
+    // never window.open(), so nothing can be blocked as a pop-up.
+    const outcome = await printCurrentPage();
+    if (!outcome.ok) {
+      setPrintError(outcome.error || 'The print dialog could not be opened. Please press Print Standee again.');
+    }
   };
 
   const handleCopyLink = async () => {
@@ -316,6 +324,12 @@ export const QRPrintModal: React.FC<QRPrintModalProps> = ({
 
         {/* Modal Actions */}
         <div className="p-4 sm:p-5 bg-white border-t border-[#e7e2dc] space-y-3">
+          {printError && (
+            <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-[11px] text-red-800 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{printError}</span>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-2">
             <button
               onClick={handleDownloadSingle}
