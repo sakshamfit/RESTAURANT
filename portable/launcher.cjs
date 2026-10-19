@@ -25,7 +25,14 @@ const APP_DIR = path.resolve(__dirname);
 const RESOURCES = path.join(APP_DIR, 'resources');
 const SERVER_ENTRY = path.join(RESOURCES, 'server.cjs');
 const DIST_DIR = path.join(RESOURCES, 'dist');
-const DATA_DIR = process.env.NEXORAOSP_DATA_DIR || path.join(os.homedir(), '.nexoraosp-restaurant', 'data');
+// Windows keeps the database where the installed Electron console keeps it
+// (%APPDATA%\NEXORAOSP RESTAURANT\data), so the portable build opens the
+// restaurant's existing orders/menu instead of starting from an empty seed.
+const DATA_DIR =
+  process.env.NEXORAOSP_DATA_DIR ||
+  (process.platform === 'win32'
+    ? path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'NEXORAOSP RESTAURANT', 'data')
+    : path.join(os.homedir(), '.nexoraosp-restaurant', 'data'));
 const READY_TIMEOUT_MS = 30000;
 const POLL_MS = 250;
 
