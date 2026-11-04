@@ -19,6 +19,7 @@ import { CafeTable, CafeSettings, Order } from '../types';
 import { api } from '../services/api';
 import { getMyDeviceOrderIds, getSubmittedFeedbackForOrder } from '../utils/deviceOrders';
 import { formatOrderDateTime } from '../utils/datetime';
+import { useBodyScrollLock } from '../utils/scrollLock';
 
 interface TableOrderHistoryModalProps {
   isOpen: boolean;
@@ -109,6 +110,8 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
     return () => window.clearInterval(interval);
   }, [isOpen, table?.token, fetchHistory]);
 
+  useBodyScrollLock(isOpen);
+
   if (!isOpen) return null;
 
   const totalTableSpending = orders
@@ -151,10 +154,13 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-[#140c07]/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 font-sans">
-      <div className="bg-white w-full max-w-lg rounded-lg shadow-2xl border border-[#e7e2dc] flex flex-col max-h-[90vh] overflow-hidden">
+    <div className="app-overlay-screen z-50 bg-[#140c07]/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 font-sans">
+      <div
+        className="bg-white w-full max-w-lg rounded-lg shadow-2xl border border-[#e7e2dc] flex flex-col overflow-hidden"
+        style={{ maxHeight: 'calc(var(--app-vh) - 1.5rem)' }}
+      >
         {/* Header */}
-        <div className="p-4 border-b border-[#3d2618] flex items-center justify-between bg-[#1e130c] text-white">
+        <div className="shrink-0 p-4 border-b border-[#3d2618] flex items-center justify-between bg-[#1e130c] text-white">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-md bg-[#2c190e] text-[#ea580c] border border-[#452c1e] flex items-center justify-center font-bold">
               <ShoppingBag className="w-4 h-4" />
@@ -192,7 +198,7 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
         </div>
 
         {/* Running Bill Summary */}
-        <div className="bg-[#faf8f5] border-b border-[#e7e2dc] px-4 py-2.5 flex items-center justify-between text-xs">
+        <div className="shrink-0 bg-[#faf8f5] border-b border-[#e7e2dc] px-4 py-2.5 flex items-center justify-between text-xs">
           <div className="flex items-center gap-2 text-[#78716c] font-medium">
             <Smartphone className="w-3.5 h-3.5 text-[#ea580c]" />
             <span>Orders on this phone: <strong className="text-[#292524]">{orders.length}</strong></span>
@@ -203,7 +209,7 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-[#faf8f5]">
+        <div className="flex-1 min-h-0 app-scroll-y p-4 space-y-3 bg-[#faf8f5]">
           {loading && orders.length === 0 && (
             <div className="py-12 text-center space-y-2">
               <div className="w-7 h-7 border-2 border-[#ea580c] border-t-transparent rounded-full animate-spin mx-auto" />
@@ -337,7 +343,10 @@ export const TableOrderHistoryModal: React.FC<TableOrderHistoryModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="p-3 border-t border-[#e7e2dc] bg-white text-center">
+        <div
+          className="shrink-0 p-3 border-t border-[#e7e2dc] bg-white text-center"
+          style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom, 0px))' }}
+        >
           <button
             onClick={onClose}
             className="w-full py-2 bg-white hover:bg-[#faf8f5] text-[#292524] border border-[#e7e2dc] rounded-md text-xs font-semibold transition-colors cursor-pointer"

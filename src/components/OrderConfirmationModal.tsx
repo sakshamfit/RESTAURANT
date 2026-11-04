@@ -3,6 +3,7 @@ import confetti from 'canvas-confetti';
 import { CheckCircle2, Clock, MapPin, Receipt, ArrowRight } from 'lucide-react';
 import { Order, CafeSettings } from '../types';
 import { formatOrderDateTime } from '../utils/datetime';
+import { useBodyScrollLock } from '../utils/scrollLock';
 
 interface OrderConfirmationModalProps {
   order: Order;
@@ -17,6 +18,8 @@ export const OrderConfirmationModal: React.FC<OrderConfirmationModalProps> = ({
   onClose,
   onTrackStatus,
 }) => {
+  useBodyScrollLock(true);
+
   useEffect(() => {
     try {
       confetti({
@@ -30,8 +33,15 @@ export const OrderConfirmationModal: React.FC<OrderConfirmationModalProps> = ({
   }, []);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#140c07]/75 backdrop-blur-xs font-sans">
-      <div className="bg-white w-full max-w-md rounded-lg shadow-2xl overflow-hidden border border-[#e7e2dc]">
+    <div className="app-overlay-screen z-50 flex items-center justify-center p-4 bg-[#140c07]/75 backdrop-blur-xs font-sans">
+      {/* Panel is height-capped to the *visible* viewport and scrolls inside
+          itself: on a small Android screen the confirmation (items list +
+          totals + 2 buttons) is taller than the address-bar viewport, and it
+          used to be clipped so the customer couldn't reach "Back to Menu". */}
+      <div
+        className="app-scroll-y bg-white w-full max-w-md rounded-lg shadow-2xl overflow-x-hidden border border-[#e7e2dc]"
+        style={{ maxHeight: 'calc(var(--app-vh) - 2rem)' }}
+      >
         {/* Header with Warm Espresso Styling */}
         <div className="bg-[#1e130c] text-white p-6 text-center relative border-b border-[#3d2618]">
           <div className="w-12 h-12 bg-[#2c190e] rounded-full flex items-center justify-center mx-auto mb-3 text-[#ea580c] border border-[#452c1e]">

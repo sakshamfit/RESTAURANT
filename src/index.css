@@ -16,12 +16,64 @@
 
 html, body {
   -webkit-text-size-adjust: 100%;
-  touch-action: pan-x pan-y;
   -webkit-overflow-scrolling: touch;
   overflow-x: hidden;
   max-width: 100vw;
   width: 100%;
   min-height: 100%;
+}
+
+/* NOTE: there used to be a global `touch-action: pan-x pan-y` here. On
+   Android Chrome that is not a scroll helper — it opts the whole page out of
+   browser pinch-zoom and of the compositor fast path, and combined with the
+   full-screen modals it made scrolling while ordering feel jerky/locked.
+   Scrolling is native by default, so no global touch-action is set now. */
+
+/* Dynamic viewport unit bridge.
+   `100vh` on Android Chrome is the *largest* viewport (address bar hidden), so
+   a full-screen ordering panel built with `100vh` is taller than the visible
+   area: the top of the cart drawer is pushed under the header, its footer CTA
+   sits under the address bar, and the page feels like it refuses to scroll.
+   `100dvh` tracks the real visible height; browsers without support fall back
+   to `100vh` and behave exactly as before.
+   Use with `height: var(--app-vh)` / `max-height: calc(var(--app-vh) - …)`. */
+:root {
+  --app-vh: 100vh;
+}
+
+@supports (height: 100dvh) {
+  :root {
+    --app-vh: 100dvh;
+  }
+}
+
+/* Full-screen ordering overlay root (cart drawer, order history, scanner,
+   order confirmation). Keeps the overlay inside the visible viewport on
+   Android and lets it clip its own scrolling instead of the page's. */
+.app-overlay-screen {
+  position: fixed;
+  inset: 0;
+  height: var(--app-vh);
+  max-height: var(--app-vh);
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
+/* A scrollable panel inside an overlay. `overscroll-behavior: contain` stops
+   scroll chaining on Android: reaching the top/bottom of the cart no longer
+   hands the gesture to the (locked) page behind it, so the finger keeps
+   driving the list the customer is actually looking at. */
+.app-scroll-y {
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Set by src/utils/scrollLock.ts while an ordering overlay is open. */
+html.app-scroll-locked,
+html.app-scroll-locked body {
+  overflow: hidden !important;
+  overscroll-behavior: none;
 }
 
 /* Android Chrome fix: when the user scrolls to the top or bottom of the
