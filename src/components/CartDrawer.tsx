@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { X, Plus, Minus, Trash2, ShoppingBag, ArrowRight, User, Phone, FileText, AlertCircle, Loader2 } from 'lucide-react';
 import { CartItem, CafeTable, CafeSettings } from '../types';
+import { useBodyScrollLock } from '../utils/scrollLock';
 
 interface CartDrawerProps {
   isOpen: boolean;
@@ -36,6 +37,10 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   const [specialInstructions, setSpecialInstructions] = useState<string>('');
   const [validationError, setValidationError] = useState<string | null>(null);
 
+  // Keep the menu behind the drawer still while ordering (Android Chrome
+  // otherwise scroll-chains the gesture to the page behind the drawer).
+  useBodyScrollLock(isOpen);
+
   if (!isOpen) return null;
 
   const totalAmount = cartItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
@@ -65,7 +70,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden font-sans">
+    <div className="app-overlay-screen z-50 font-sans">
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-[#140c07]/70 backdrop-blur-xs transition-opacity"
@@ -76,7 +81,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
       <div className="absolute inset-y-0 right-0 max-w-full flex pl-4 sm:pl-10 w-full sm:max-w-md">
         <div className="w-full bg-[#ffffff] shadow-2xl flex flex-col justify-between overflow-hidden border-l border-[#e7e2dc]">
           {/* Header */}
-          <div className="p-5 sm:p-6 bg-[#1e130c] text-white border-b border-[#3d2618] flex items-center justify-between">
+          <div className="shrink-0 p-5 sm:p-6 bg-[#1e130c] text-white border-b border-[#3d2618] flex items-center justify-between">
             <div>
               <h3 className="text-lg font-semibold tracking-tight text-white">Your Order</h3>
               <p className="text-xs text-[#e2d9d2] font-medium tracking-tight mt-0.5">
@@ -93,8 +98,11 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
             </button>
           </div>
 
-          {/* Cart Body */}
-          <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-6 bg-[#faf8f5]">
+          {/* Cart Body — the only scrolling region while ordering. `min-h-0`
+              is required so this flex child actually shrinks on Android
+              Chrome; without it the list grows past the screen, the footer
+              CTA is pushed out of view and the drawer looks unscrollable. */}
+          <div className="flex-1 min-h-0 app-scroll-y p-5 sm:p-6 space-y-6 bg-[#faf8f5]">
             {validationError && (
               <div className="p-3 bg-red-50 border border-red-200 rounded-md text-red-700 text-xs font-semibold flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
@@ -260,9 +268,14 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
             )}
           </div>
 
-          {/* Footer Checkout CTA */}
+          {/* Footer Checkout CTA — pinned, never scrolled away, and padded
+              for the Android gesture bar / iOS home indicator so the button
+              is always fully tappable. */}
           {cartItems.length > 0 && (
-            <div className="p-6 bg-white border-t border-[#e7e2dc]">
+            <div
+              className="shrink-0 p-6 bg-white border-t border-[#e7e2dc]"
+              style={{ paddingBottom: 'max(1.5rem, calc(1rem + env(safe-area-inset-bottom, 0px)))' }}
+            >
               <div className="flex justify-between items-end mb-4">
                 <p className="text-[#78716c] text-xs font-semibold uppercase tracking-wider">Total Amount</p>
                 <p className="text-2xl font-bold text-[#1e130c] tracking-tight leading-none">

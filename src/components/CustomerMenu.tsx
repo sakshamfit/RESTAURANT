@@ -88,7 +88,7 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
   return (
     <div
       className="min-h-[100dvh] bg-[#faf8f5] text-[#292524] flex flex-col font-sans"
-      style={{ paddingBottom: 'max(7rem, calc(6rem + env(safe-area-inset-bottom, 0px)))' }}
+      style={{ paddingBottom: 'max(7.5rem, calc(6.5rem + env(safe-area-inset-bottom, 0px)))' }}
     >
       {/* Editorial Dark Hero Band */}
       <section className="bg-[#1e130c] text-white hero-backdrop-atmospheric border-b border-[#3d2618] px-4 sm:px-8 py-8 sm:py-12">
@@ -251,7 +251,12 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
           </div>
 
           {/* Mobile Categories Horizontal Strip */}
-          <div className="flex lg:hidden items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+          {/* Horizontal category strip. On Android a horizontal scroller with
+              the default `touch-action` can swallow a slightly diagonal
+              vertical swipe, so the page stops moving while the strip does
+              not scroll either. Pinning the strip to horizontal panning keeps
+              the vertical gesture with the page. */}
+          <div className="flex lg:hidden items-center gap-2 overflow-x-auto overflow-y-hidden pb-1 scrollbar-none overscroll-x-contain touch-pan-x">
             <button
               type="button"
               onClick={() => setSelectedCategory('all')}
@@ -288,7 +293,7 @@ export const CustomerMenu: React.FC<CustomerMenuProps> = ({
 
           {/* Products Grid */}
           {filteredProducts.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5 [&>*]:min-w-0">
               {filteredProducts.map((product) => (
                 <ProductCard
                   key={product.id}

@@ -7,6 +7,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { CafeTable } from '../types';
+import { useBodyScrollLock } from '../utils/scrollLock';
 
 interface TableQRScannerModalProps {
   isOpen: boolean;
@@ -196,14 +197,19 @@ export const TableQRScannerModal: React.FC<TableQRScannerModalProps> = ({
     }
   };
 
+  useBodyScrollLock(isOpen);
+
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-stone-950/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 font-sans">
-      <div className="bg-white border border-[#e7e2dc] w-full max-w-md rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[92vh] text-[#1e130c]">
+    <div className="app-overlay-screen z-50 bg-stone-950/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 font-sans">
+      <div
+        className="bg-white border border-[#e7e2dc] w-full max-w-md rounded-2xl overflow-hidden shadow-2xl flex flex-col text-[#1e130c]"
+        style={{ maxHeight: 'calc(var(--app-vh) - 1.5rem)' }}
+      >
         
         {/* Header */}
-        <div className="px-5 py-4 border-b border-[#3a291e] flex items-center justify-between bg-[#1e130c] text-white">
+        <div className="shrink-0 px-5 py-4 border-b border-[#3a291e] flex items-center justify-between bg-[#1e130c] text-white">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-xl bg-[#2a1b12] text-[#ea580c] border border-[#3d271a] flex items-center justify-center">
               <QrCode className="w-4 h-4" />
@@ -228,7 +234,7 @@ export const TableQRScannerModal: React.FC<TableQRScannerModalProps> = ({
         </div>
 
         {/* Modal Body */}
-        <div className="p-4 sm:p-5 overflow-y-auto space-y-4 flex-1 bg-[#faf8f5]">
+        <div className="flex-1 min-h-0 app-scroll-y p-4 sm:p-5 space-y-4 bg-[#faf8f5]">
           
           {/* Scanner Viewport */}
           <div className="relative w-full aspect-square max-h-60 sm:max-h-64 rounded-xl overflow-hidden bg-stone-950 border border-[#e7e2dc] flex items-center justify-center shadow-inner">
