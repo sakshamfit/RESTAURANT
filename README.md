@@ -99,27 +99,70 @@ durable order history) and the exact behaviour of `/api/health`.
 ## Distributing the desktop app to paying customers
 
 The desktop installer is shipped the same way Marg / Petpooja / any
-on-premise POS is: customers download a binary, enter a license key
-emailed to them, and the app activates on that machine.
+on-premise POS is: customers download a binary, enter the credentials
+**you emailed them** (license key + email), and the app activates on
+that machine. There is no signup anywhere in the customer flow, and
+the trial choice is compiled out of customer builds — the wizard goes
+straight to the credential form.
+
+### Customer build flow
+
+1. Install the EXE (Windows / macOS / Linux).
+2. First launch → **Activate your license**: café name + the email and
+   key you sent. Activation is verified by your central license server
+   (online, once — the same machine can re-activate offline afterwards).
+3. **Create the staff-console password** (one-time, local, not an
+   account). The console is now open.
+4. **All café data stays on the customer's own computer** in the user
+   data folder (`…/NEXORAOSP RESTAURANT/data/`). Nothing leaves the
+   machine, no database or cloud service is required. Optionally a
+   `DATABASE_URL` can be baked in for multi-machine setups.
 
 ### Build a customer-ready installer
 
+Distribution settings are **baked into the installer** by the build
+script (the packaged app cannot read the builder's environment), so
+set them before running it:
+
 ```bash
-# 1. Set the license env vars (one-time per build)
 export LICENSE_REQUIRED=true
 export LICENSE_API_BASE=https://license.yourcompany.com
-export LICENSE_SIGNING_SECRET="$(openssl rand -hex 32)"
 export LICENSE_ALLOW_SELF_ISSUE=false
+export LICENSE_TRIAL_DAYS=0          # no trial — login only
 
-# 2. Build the installers
-npm run build
-npm run desktop:build
+npm run desktop:build                 # current platform
+# or, for every platform (macOS DMG requires macOS):
+npm run desktop:build -- --win --linux
 ```
 
+`scripts/build-desktop.mjs` writes these into `desktop/app/build-env.json`
+inside the staged app; `desktop/main.cjs` merges them into the bundled
+server's environment on every launch. It also bakes the RSA **public**
+key from `license-keys/public.pem`, so nothing secret is ever embedded
+in a customer installer — the private key lives only on your license
+server (`LICENSE_PRIVATE_KEY`, see `license-server/README.md`). Keep
+that private key out of Git and off build machines.
+
 The output in `release/` is a per-platform installer that, on first
-launch, shows a one-screen activation wizard (café name + email +
-license key). The customer cannot use the admin console until the
-key is activated.
+launch, shows the activation wizard (café name + email + license key).
+The customer cannot use the admin console until the key is activated.
+On a fresh machine the wizard also asks for a one-time staff-console
+password before the console opens.
+
+### Automated GitHub releases
+
+`.github/workflows/desktop-release.yml` builds Windows + Linux +
+macOS installers with the license gate baked in and attaches them to
+a GitHub Release. It needs **no repository secrets** — the public key
+ships in the repo:
+
+1. (Optional) Set the repository **Variable** `LICENSE_API_BASE` to
+   your license server URL (defaults to
+   `https://license.nexoraosp.com`); optional `ADMIN_EMAIL`.
+2. Deploy the license server with the matching private key
+   (`LICENSE_PRIVATE_KEY` in Vercel).
+3. Push a `v1.0.1`-style tag (or run the workflow manually from the
+   Actions tab).
 
 ### License server endpoints (you host this)
 
@@ -135,5 +178,6 @@ shapes in `src/server/license.ts`):
 
 A minimal implementation is a tiny Node/Express service backed by a
 Postgres table of `{ key_id, email, plan, status, fingerprint,
-activated_at, expires_at }`. The signing secret MUST match the one
-baked into the desktop build above.
+activated_at, expires_at }`. It signs JWTs with the RSA private key
+(`LICENSE_PRIVATE_KEY`); the matching public key is baked into the
+desktop build from `license-keys/public.pem`.

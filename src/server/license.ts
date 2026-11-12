@@ -30,6 +30,28 @@ const LICENSE_REQUIRED = process.env.LICENSE_REQUIRED === 'true';
 const LICENSE_API_BASE = (process.env.LICENSE_API_BASE || 'https://license.nexoraosp.com').replace(/\/+$/, '');
 
 /**
+ * RSA public key (PEM) baked into distributed builds — the customer build
+ * verifies license JWTs with this key and nothing else. The matching
+ * PRIVATE key lives only on the central license server (Vercel env var
+ * LICENSE_PRIVATE_KEY), so a customer who extracts everything out of the
+ * installer still cannot mint license tokens. When unset (self-hosted /
+ * dev builds) the app falls back to HS256 with the local signing secret,
+ * which is fine because those builds never gate on a remote server.
+ *
+ * Env values arrive in two shapes: the real PEM (with newlines, CI reads
+ * the file) or a single line with literal `\n` escapes (hand-editing an
+ * env var). Both are normalized here.
+ */
+function normalizePem(value: string | undefined): string | null {
+  if (!value || !value.trim()) return null;
+  let pem = value.trim();
+  if (!pem.includes('\n') && pem.includes('\\n')) pem = pem.replace(/\\n/g, '\n');
+  if (!/-----BEGIN PUBLIC KEY-----/.test(pem)) return null;
+  return pem;
+}
+const LICENSE_PUBLIC_KEY = normalizePem(process.env.LICENSE_PUBLIC_KEY);
+
+/**
  * Length of the auto-issued trial license, in days. Set via
  * `LICENSE_TRIAL_DAYS=14` in the distributed build's env. When
  * `LICENSE_REQUIRED=true` and no license file is present, the app
@@ -296,7 +318,12 @@ export async function verifyLicense(): Promise<LicenseStatus> {
 
   let payload: LicensePayload;
   try {
-    payload = jwt.verify(stored.token, SIGNING_SECRET, { algorithms: ['HS256'] }) as LicensePayload;
+    // Distributed builds verify with the baked RSA public key (the server
+    // signs with its private key). Self-hosted / dev builds use the local
+    // HS256 secret, which is also what startTrial()/selfIssueLicense() mint.
+    payload = LICENSE_PUBLIC_KEY
+      ? (jwt.verify(stored.token, LICENSE_PUBLIC_KEY, { algorithms: ['RS256'] }) as LicensePayload)
+      : (jwt.verify(stored.token, SIGNING_SECRET, { algorithms: ['HS256'] }) as LicensePayload);
   } catch (error) {
     return {
       state: 'invalid',

@@ -25,6 +25,15 @@ type AdminCredential = {
   passwordHash: string;
   passwordSalt: string;
   updatedAt: string;
+  /**
+   * True only for credentials auto-created from the built-in default on a
+   * fresh install (no ADMIN_PASSWORD in the environment). Distributed
+   * customer builds use this flag to ask the owner to choose a staff-console
+   * password right after license activation — before the console opens to
+   * phones on the café Wi-Fi. Once any password is set (setup or Settings
+   * change), the flag flips to false and the setup step is never shown again.
+   */
+  initial?: boolean;
 };
 
 let cached: AdminCredential | null = null;
@@ -87,6 +96,11 @@ export async function initAdminAuth(): Promise<void> {
       passwordHash: hashPassword(DEFAULT_ADMIN_PASSWORD, salt),
       passwordSalt: salt,
       updatedAt: new Date().toISOString(),
+      // A fresh install with no ADMIN_PASSWORD set keeps the built-in default
+      // only until the owner picks a password. When ADMIN_PASSWORD comes from
+      // the environment (vendor-managed builds), the credential is NOT
+      // "initial": the vendor controls it and no setup step is shown.
+      initial: !ADMIN_PASSWORD,
     };
     await writeCredentials(cached);
     console.log(`[auth] Created single admin account (${CREDENTIALS_FILE}).`);
@@ -103,6 +117,7 @@ export async function initAdminAuth(): Promise<void> {
       passwordHash: hashPassword(ADMIN_PASSWORD, salt),
       passwordSalt: salt,
       updatedAt: new Date().toISOString(),
+      initial: false,
     };
     await writeCredentials(cached);
     console.log('[auth] ADMIN_PASSWORD from environment differs from the saved password — re-saved credentials from env.');
@@ -116,6 +131,50 @@ export function getAdminEmail(): string {
 export function verifyAdminPassword(password: string): boolean {
   if (!password) return false;
   return matchesSavedPassword(password);
+}
+
+/**
+ * True while the account still uses the password auto-created from the
+ * built-in default (see AdminCredential.initial). Used by the distributed
+ * build's setup wizard to ask the owner for a staff-console password right
+ * after license activation; never true on the hosted web build (it always
+ * has ADMIN_PASSWORD from the environment).
+ */
+export function isInitialAdminPassword(): boolean {
+  return cached?.initial === true;
+}
+
+/**
+ * One-time setup of the staff-console password. Only allowed while the
+ * account is still "initial" (created from the built-in default), so a
+ * customer who just activated a license can secure their console before
+ * it is reachable from phones on the café Wi-Fi. Once called, the flag
+ * flips to false and this endpoint refuses further use — the regular
+ * Settings → Update Password flow takes over.
+ */
+export async function setInitialAdminPassword(
+  password: string,
+  confirm: string
+): Promise<{ ok: boolean; message: string }> {
+  if (!isInitialAdminPassword()) {
+    return { ok: false, message: 'The staff password has already been set. Log in and use Café Settings → Update Password if you want to change it.' };
+  }
+  if (!password || password.length < 6) {
+    return { ok: false, message: 'Password must be at least 6 characters.' };
+  }
+  if (password !== confirm) {
+    return { ok: false, message: 'Passwords do not match.' };
+  }
+  const salt = randomSalt();
+  cached = {
+    ...(cached as AdminCredential),
+    passwordHash: hashPassword(password, salt),
+    passwordSalt: salt,
+    updatedAt: new Date().toISOString(),
+    initial: false,
+  };
+  await writeCredentials(cached as AdminCredential);
+  return { ok: true, message: 'Staff password set.' };
 }
 
 export async function changeAdminPassword(
@@ -134,6 +193,7 @@ export async function changeAdminPassword(
     passwordHash: hashPassword(newPassword, salt),
     passwordSalt: salt,
     updatedAt: new Date().toISOString(),
+    initial: false,
   };
   await writeCredentials(cached as AdminCredential);
   return { ok: true, message: 'Password updated.' };

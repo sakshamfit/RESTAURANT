@@ -34,25 +34,40 @@ git commit -m "Initial license server"
 gh repo create nexoraosp-license --public --source=. --push
 ```
 
-### 3. Deploy to Vercel
+### 3. Generate an RSA keypair (once)
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out private-key.pem
+openssl pkey -in private-key.pem -pubout -out public.pem
+```
+
+Copy `public.pem` into the app repo as `license-keys/public.pem`
+(it is baked into every installer — it is public, so committing it is
+fine). Keep `private-key.pem` OUT of any repo.
+
+### 4. Deploy to Vercel
 
 ```bash
 # First time: link the project
 npx vercel link
 
-# Set the three required env vars.
-#   LICENSE_SIGNING_SECRET — the same HS256 secret you baked into
-#     the desktop build. Use 64+ random bytes. NEVER rotate without
-#     re-releasing the desktop app or every install locks itself out.
+# Set the required env vars.
+#   LICENSE_PRIVATE_KEY — the RSA PRIVATE key (paste the whole PEM;
+#     Vercel secrets accept multi-line values). The matching public key
+#     is baked into the desktop app, so the installer never contains
+#     a secret and customers cannot forge tokens.
 #   LICENSE_ADMIN_PASSWORD — the password the admin page asks for.
 #   POSTGRES_URL (or DATABASE_URL) — your Postgres connection string.
-npx vercel env add LICENSE_SIGNING_SECRET production
+npx vercel env add LICENSE_PRIVATE_KEY production
 npx vercel env add LICENSE_ADMIN_PASSWORD production
 npx vercel env add POSTGRES_URL production
 
 # First deploy.
 npx vercel --prod
 ```
+
+> Legacy deployments may keep using `LICENSE_SIGNING_SECRET` (HS256).
+> Prefer `LICENSE_PRIVATE_KEY` for customer builds.
 
 ### 4. Run the migration once
 
@@ -80,15 +95,14 @@ keys with a Revoke button per row.
 ## Wiring the desktop app to this server
 
 When you build the desktop installer (or the web app), set
-`LICENSE_API_BASE` to the deployed URL of this server:
+`LICENSE_API_BASE` to the deployed URL of this server. The build script
+bakes the RSA public key from `license-keys/public.pem` automatically,
+so no key material is needed on the build machine:
 
 ```bash
-# desktop/package.json's build block, or as an env var when running
-# `npm run dist`:
 LICENSE_API_BASE=https://nexoraosp-license.vercel.app \
-LICENSE_SIGNING_SECRET=<the same secret> \
 LICENSE_REQUIRED=true \
-npm run dist
+npm run desktop:build
 ```
 
 Customers in the Setup Wizard will type the email + key you sent
@@ -117,7 +131,7 @@ propagates within 6h at the latest.
 npm install
 # In one terminal:
 POSTGRES_URL=postgres://postgres:postgres@localhost:5432/nexoraosp_licenses \
-LICENSE_SIGNING_SECRET=devsecret \
+LICENSE_PRIVATE_KEY="$(cat /path/to/private-key.pem)" \
 LICENSE_ADMIN_PASSWORD=admin \
 npx vercel dev
 # In another:
@@ -129,10 +143,12 @@ needs no migration step in dev.
 
 ## Security notes
 
-- The `LICENSE_SIGNING_SECRET` is the only thing standing between an
-  attacker and a forged license. 64+ random bytes (e.g. from
-  `openssl rand -hex 32`) is the right size. Treat it like a
-  database password.
+- The RSA `LICENSE_PRIVATE_KEY` is the only thing standing between an
+  attacker and a forged license. Generate it with 2048+ bits, keep it
+  out of Git and off the build machine, and treat it like a database
+  password. (Legacy `LICENSE_SIGNING_SECRET` HS256 mode: use 64+ random
+  bytes and understand that the same secret is baked into every
+  installer.)
 - `LICENSE_ADMIN_PASSWORD` only gates the admin page. Choose a
   strong one. Brute force is rate-limited at 5 attempts per minute
   per IP, so offline cracking is the only viable attack.
